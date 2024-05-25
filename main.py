@@ -24,7 +24,7 @@ class MainGame:
         self.warehouse_res = (80,70)
         self.warehouse_windowBackgroundColour = [50,50,50]
         self.warehouse_windowRes = (320, 280) # upsized resolution (width, height)
-
+        self.frametime_cap = .025
         # Init Windows
         self = self.initWarehouseWindow()
         self = self.initSecondaryWindows()
@@ -79,6 +79,10 @@ class MainGame:
         self.gameDraw()
 
         frameTime = round(time.time() - timeLoopStart, 3)
+        
+        if (frameTime < self.frametime_cap):
+            time.sleep(self.frametime_cap - frameTime)
+        
         if loop_count % 1 == 0:
             pass
             #print('- L#{}, t: {}, pIn: {}, pToMove: {}, rIn: {}, pMoving: {}, avg_frameTime: {}'.format(loop_count, self.timeElapsed, self.warehouse.packagesInWarehouseCount, len(self.warehouse.packagesMoveList), self.warehouse.robotsInWarehouseCount, len(self.warehouse.packagesMovingList), frameTime))
