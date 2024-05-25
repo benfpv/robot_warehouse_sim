@@ -21,9 +21,9 @@ class MainGame:
         self.timeStart = int(time.time())
         self.exit = False
         # User Parameters
-        self.warehouse_res = (80,80)
+        self.warehouse_res = (80,70)
         self.warehouse_windowBackgroundColour = [50,50,50]
-        self.warehouse_windowRes = (366, 366) # upsized resolution (width, height)
+        self.warehouse_windowRes = (320, 280) # upsized resolution (width, height)
 
         # Init Windows
         self = self.initWarehouseWindow()
