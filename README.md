@@ -1,14 +1,14 @@
 # Robot_Warehouse_Sim
-Robot_Warehouse_Sim simulates an autonomous scalable framework which uses robots to manage import, storage, and export of packages, in a time-dependent manner, within a warehouse-type environment.
+Robot_Warehouse_Sim simulates an autonomous scalable framework which uses robots to manage import, storage, and export of packages, in a time-sensitive manner, within a warehouse-type environment.
 
 ![robot_warehouse_sim](https://github.com/benfpv/robot_warehouse_sim/assets/55154673/d94b5d34-b65e-41d7-97d8-b29c454b6042)
 
 # Features
-- The warehouse environment consists of an import, storage, and export area for packages, where packages can only "enter" the warehouse via import areas, and "exit" the warehouse via export areas.
-- Each package has unique identifiers, real-time status, deadline-to-export, and their history in the warehouse from import-to-export is logged.
-- Each robot can transport one package at a time, has unique identifiers, real-time status, location, trajectory, dynamic battery & charging at charging stations along the warehouse perimiter, and action queue.
+- The warehouse environment consists of an import, storage, and export area for packages, where packages "enter" the warehouse via import areas, and "exit" the warehouse via export areas.
+- Each package has unique identifiers, real-time position and status, deadline-to-export, and their history in the warehouse from import-to-export is logged.
+- Each robot can transport one package at a time, has unique identifiers, real-time position and status, dynamic battery & charging (at charging stations along the warehouse perimiter), and priority-based action queue.
 - Robots currently do not have (but are designed to be able to handle) collision-avoidance, optimized trajectories, and ability to carry other robots which are deemed defective.
-- Each robot's action queue is managed dynamically by the warehouse to distribute packages across storage and export areas in a space-efficient and deadline-aware manner, charge robots when low on battery, and avoid overlapping package movements or locations at any time.
+- Each robot's action queue is managed dynamically by the warehouse to distribute packages across storage and export areas in a time-efficient (i.e., sampling-based search for available space) and deadline-prioritized manner, to charge robots when low on battery, and to avoid package-movement-effort duplication at any time.
 
 # Known Issues
 - When a robot is done charging but idle (no tasks assigned), another robot can superimpose to charge at the charger.
