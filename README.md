@@ -1,6 +1,8 @@
 # Robot_Warehouse_Sim
 Robot_Warehouse_Sim simulates an autonomous scalable framework which uses robots to manage import, storage, and export of packages, in a time-dependent manner, within a warehouse-type environment.
 
+![robot_warehouse_sim](https://github.com/benfpv/robot_warehouse_sim/assets/55154673/d94b5d34-b65e-41d7-97d8-b29c454b6042)
+
 # Features
 - The warehouse environment consists of an import, storage, and export area for packages, where packages can only "enter" the warehouse via import areas, and "exit" the warehouse via export areas.
 - Each package has unique identifiers, real-time status, deadline-to-export, and their history in the warehouse from import-to-export is logged.
