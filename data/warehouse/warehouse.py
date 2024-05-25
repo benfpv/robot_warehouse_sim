@@ -173,7 +173,7 @@ class Warehouse:
         self.importSpaceAvailable, self.storageSpaceAvailable, self.exportSpaceAvailable = self.update_space_available()
         self.packagesLog, self.robotsLog = self.trim_logs()
         self.record_warehouse_data()
-        self.printDebugInfo()
+        #self.printDebugInfo()
         self.warehouseLoopCount += 1
         return self
 
@@ -351,7 +351,7 @@ class Warehouse:
 
     # Update Packages
     def update_packages(self):
-        print("- importSpaceAvailable: {}".format(self.importSpaceAvailable))
+        #print("- importSpaceAvailable: {}".format(self.importSpaceAvailable))
         if self.importSpaceAvailable:
             self.packagesRollingCount, self.packagesInImportCount, self.packagesInWarehouseCount, self.packages, self.packagesLog = Package_Functions.import_package(Package_Functions, self.importNumTries, self.importAreas, self.numberOfImportAreas, self.sizeOfImportAreas, self.packagesRollingCount, self.packagesInImportCount, self.packagesPlannedInImportCount, self.packagesInWarehouseCount, self.packagesInImportAreas, self.packagesInWarehouse, self.packageTargetsInWarehouse, self.packagesMaxQuantity, self.packages, self.packagesLog, self.itemsList, self.addressesList, self.datetimeNow) # Import package
         self.packages = self.update_packages_timeToDeadline(self.datetimeNow) # Update package timeToDeadline
