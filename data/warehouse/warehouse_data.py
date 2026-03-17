@@ -60,7 +60,7 @@ class Warehouse_Data:
         # numChargers
         self.numChargersIdle = numChargersIdle
         self.numChargersCharging = numChargersCharging
-        # nuMRobots
+        # numRobots
         self.numRobotsImported = numRobotsImported
         self.numRobotsInWarehouse = numRobotsInWarehouse
         self.numRobotsExported = numRobotsExported
@@ -96,7 +96,7 @@ class Warehouse_Data:
         # numChargers
         self.numChargersIdle = np.zeros(self.dataMaxLength, dtype = "int")
         self.numChargersCharging = np.zeros(self.dataMaxLength, dtype = "int")
-        # nuMRobots
+        # numRobots
         self.numRobotsImported = np.zeros(self.dataMaxLength, dtype = "int")
         self.numRobotsInWarehouse = np.zeros(self.dataMaxLength, dtype = "int")
         self.numRobotsExported = np.zeros(self.dataMaxLength, dtype = "int")

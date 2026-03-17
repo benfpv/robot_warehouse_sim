@@ -1,6 +1,4 @@
 from datetime import date, datetime
-import math
-import random
 import time
 
 class Robot:
@@ -24,6 +22,7 @@ class Robot:
         self.status = status
         self.carrying = carrying
         self.carrier = carrier
+        self.createdAt = time.time()
 
 class Robot_Log:
     def __init__(self, action, datetimeNow):

@@ -3,6 +3,7 @@ from data.item import *
 from data.address import *
 
 class Importer:
+    @staticmethod
     def init_import_csv_as_list(csvPath):
         print('Importer.init_import_csv_as_list() ')
         # import list_items.csv as a list of items; row = item, col = item characteristics
@@ -19,6 +20,7 @@ class Importer:
                 row_count += 1 
         return itemsList
 
+    @staticmethod
     def init_objectify_items_list(itemsList):
         print('Importer.init_objectify_items_list()')
         newItemsList = {} 
@@ -27,6 +29,7 @@ class Importer:
         #print('- Example from Objectified Items List: ' + str(newItemsList['apple'].name))
         return newItemsList
     
+    @staticmethod
     def init_objectify_addresses_list(itemsList):
         print('Importer.init_objectify_addresses_list()')
         newAddressesList = {} 

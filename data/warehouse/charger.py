@@ -1,7 +1,4 @@
 from datetime import date, datetime
-import math
-import random
-import time
 
 class Charger:
     def __init__(self, chargerNumber, colour, area, xyLocation, status) -> None:

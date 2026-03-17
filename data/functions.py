@@ -2,6 +2,7 @@ import random
 import numpy as np
 
 class Functions:
+    @staticmethod
     def get_screensize(screenshot):
         #print("Functions.get_screensize()")
         if not screenshot.any():
@@ -11,6 +12,7 @@ class Functions:
         #print("- screensize: {}".format(screensize))
         return screensize
 
+    @staticmethod
     def get_screencenter(screensize):
         #print("Functions.get_screencenter()")
         if not screensize:
@@ -18,6 +20,7 @@ class Functions:
         screencenter = (int(screensize[0]*0.5), int(screensize[1]*0.5))
         return screencenter
 
+    @staticmethod
     def get_screenarray_colour(screensize, backgroundColour):
         print("Functions.get_screenarray_colour()")
         if (not screensize) or (not backgroundColour):
@@ -26,6 +29,7 @@ class Functions:
         screenArray[:][:] = backgroundColour
         return screenArray
     
+    @staticmethod
     def get_screenarray_gray(screensize):
         print("Functions.get_screenarray_gray()")
         if (not screensize):
@@ -34,6 +38,7 @@ class Functions:
         screenArray[:][:] = 0
         return screenArray
 
+    @staticmethod
     def find_perimeter_coordinates(windowRes, pixelsFromEdge):
         perimeterCoordinates = []
         # First Row
@@ -65,6 +70,7 @@ class Functions:
         #    print('- ' + str(i))
         return perimeterCoordinates
 
+    @staticmethod
     def find_cardinal(degree):
         # degree of 360
         if degree == 0:
@@ -109,6 +115,7 @@ class Functions:
                 cardinal = 'E'
         return cardinal
 
+    @staticmethod
     def find_location_from_cardinal(cardinal):
         xyMove = [0,0]
         if cardinal == 'E':
@@ -133,6 +140,7 @@ class Functions:
             xyMove[1] -= 1
         return xyMove
 
+    @staticmethod
     def find_angle_from_cardinal(cardinal):
         if cardinal == 'E':
             coinflip = random.randint(0,1)
@@ -156,12 +164,14 @@ class Functions:
             angle = random.randint(300,330)
         return angle
     
+    @staticmethod
     def zerofy_1d(array):
         for i in range(0, len(array)):
             if array[i] != 0:
                 array[i] = 0
         return array
 
+    @staticmethod
     def zerofy_2d(array):
         for row in range(0, len(array)):
             for col in range(0, len(array[row])):
@@ -169,9 +179,10 @@ class Functions:
                     array[row][col] = 0
         return array
 
-    def ensure_limit_1d(val, min, max):
-        if (val < min):
-            val = min
-        elif (val > max):
-            val = max
+    @staticmethod
+    def ensure_limit_1d(val, min_val, max_val):
+        if (val < min_val):
+            val = min_val
+        elif (val > max_val):
+            val = max_val
         return val

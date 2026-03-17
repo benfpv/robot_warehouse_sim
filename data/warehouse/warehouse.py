@@ -8,7 +8,6 @@ import time
 from data.functions import *
 from data.functions_timeseries import *
 from data.warehouse.warehouse_init import *
-from data.warehouse.warehouse_functions import *
 from data.warehouse.package import *
 from data.warehouse.package_functions import *
 from data.warehouse.charger import *
@@ -17,39 +16,37 @@ from data.warehouse.robot import *
 from data.warehouse.robot_functions import *
 from data.warehouse.warehouse_data import *
 
+ZONE_NONE = 0
+ZONE_IMPORT = 1
+ZONE_STORAGE = 2
+ZONE_EXPORT = 3
+
 class Warehouse:
     def __init__(self,
                     # Window Resolution, Window Center
                     windowRes = [], windowBackgroundColour = [], windowCenter = [], windowArray = [], itemsList = [], addressesList = [],
                     # Warehouse
                     warehouseLoopCount = 0, datetimeNow = datetime.now(), timeStart = time.time(), timeElapsed = 0, warehouseWindowRes = [], warehouseBackgroundColour = [], warehouseWindowCenter = [], warehouseWindowArray = [], warehousePerimeterCoordinates = [],
-                    heightOfImportFloor = 0, heightOfStorageFloor = 0, heightOfExportFloor = 0,
                     colourOfImportAreas = (10,30,10), colourOfStorageAreas = (30,10,10), colourOfExportAreas = (10,10,30),
-                    numberOfImportAreas = [2,2], numberOfStorageAreas = [2,2], numberOfExportAreas = [2,2],
-                    sizeOfImportAreas = [], sizeOfStorageAreas = [], sizeOfExportAreas = [],
-                    numberOfImportSlots = 100, numberOfStorageSlots = 100, numberOfExportSlots = 100,
-                    importAreas = [], storageAreas = [], exportAreas = [],
-                    numberOfLanes = 2, colourOfLanes = (20,20,20), space = 0, demispace = 0,
                     logsMaxLength = 10000, dataMaxLength = 200, warehouse_data = [],
                     # Space Availability
                     packagesInImportCount = 0, packagesInStorageCount = 0, packagesInExportCount = 0, packagesInWarehouseCount = 0,
                     packagesPlannedInImportCount = 0, packagesPlannedInStorageCount = 0, packagesPlannedInExportCount = 0,
                     importSpaceAvailable = True, storageSpaceAvailable = True, exportSpaceAvailable = True,
-                    importNumTries = 1, storageNumTries = 5, exportNumTries = 1,
                     packageExportCount = 0, packageExportRollingCount = 0,
                     # Packages
                     packageDimensionsLimit = 1, packagesActionsList = ["idle", "carried"],
                     packages = [], packagesLog = [], packagesMaxQuantity = 2000,
-                    packagesMoveList = [], packagesMaxMoveQuantity = 40, packagesRollingCount = 0,
-                    packagesInWarehouse = [], packagesInImportAreas = [], packagesInStorageAreas = [], packagesInExportAreas = [], packageTargetsInWarehouse = [],
+                    packagesMoveList = [], packagesMaxMoveQuantity = 120, packagesRollingCount = 0,
+                    packagesInWarehouse = [], packageTargetsInWarehouse = [],
                     # Robots
                     packagesMovingList = [], robotsActionsList = ["none", "idle", "charging", "move to charging station", "move to target pickup location", "move to target dropoff location", "pickup target package", "dropoff target package"],
-                    robots = [], robotsLog = [], robotsInWarehouse = [], robotsMaxQuantity = 40, robotsRollingCount = 0, robotsInWarehouseCount = 0,
+                    robots = [], robotsLog = [], robotsInWarehouse = [], robotsMaxQuantity = 60, robotsRollingCount = 0, robotsInWarehouseCount = 0,
                     robotsTaskAssignmentList = [], robotsTaskAssignmentStyle = 0, robotsTaskAssignmentMaxQuantity = 3,
                     numRobotsIdle = 0, numRobotsMoving = 0, numRobotsCharging = 0,
                     # Charging station(s)
                     chargersActionsList = ["none", "idle", "charging planned", "charging"], 
-                    chargers = [], chargersMaxQuantity = 120, chargersInWarehouse = [], chargersRollingCount = 0
+                    chargers = [], chargersMaxQuantity = 10, chargersInWarehouse = [], chargersRollingCount = 0
                 ) -> None:
         print("--- Warehouse Init ---")
         # Window Resolution, Window Center
@@ -72,29 +69,10 @@ class Warehouse:
         self.logsMaxLength = logsMaxLength
         self.dataMaxLength = dataMaxLength
         self.warehouse_data = warehouse_data
-        # Floor and Areas
-        self.heightOfImportFloor = heightOfImportFloor
-        self.heightOfStorageFloor = heightOfStorageFloor
-        self.heightOfExportFloor = heightOfExportFloor
+        # Zone colours
         self.colourOfImportAreas = colourOfImportAreas
         self.colourOfStorageAreas = colourOfStorageAreas
         self.colourOfExportAreas = colourOfExportAreas
-        self.numberOfImportAreas = numberOfImportAreas
-        self.numberOfStorageAreas = numberOfStorageAreas
-        self.numberOfExportAreas = numberOfExportAreas
-        self.sizeOfImportAreas = sizeOfImportAreas
-        self.sizeOfStorageAreas = sizeOfStorageAreas
-        self.sizeOfExportAreas = sizeOfExportAreas
-        self.numberOfImportSlots = numberOfImportSlots
-        self.numberOfStorageSlots = numberOfStorageSlots
-        self.numberOfExportSlots = numberOfExportSlots
-        self.importAreas = importAreas
-        self.storageAreas = storageAreas
-        self.exportAreas = exportAreas
-        self.numberOfLanes = numberOfLanes
-        self.colourOfLanes = colourOfLanes
-        self.space = space
-        self.demispace = demispace
         # Areas Count and Availability
         self.packagesInImportCount = packagesInImportCount
         self.packagesInStorageCount = packagesInStorageCount
@@ -106,9 +84,6 @@ class Warehouse:
         self.importSpaceAvailable = importSpaceAvailable
         self.storageSpaceAvailable = storageSpaceAvailable
         self.exportSpaceAvailable = exportSpaceAvailable
-        self.importNumTries = importNumTries
-        self.storageNumTries = storageNumTries
-        self.exportNumTries = exportNumTries
         # Package Export
         self.packageExportCount = packageExportCount
         self.packageExportRollingCount = packageExportRollingCount
@@ -122,9 +97,6 @@ class Warehouse:
         self.packagesMaxMoveQuantity = packagesMaxMoveQuantity
         self.packagesRollingCount = packagesRollingCount
         self.packagesInWarehouse = packagesInWarehouse
-        self.packagesInImportAreas = packagesInImportAreas
-        self.packagesInStorageAreas = packagesInStorageAreas
-        self.packagesInExportAreas = packagesInExportAreas
         self.packageTargetsInWarehouse = packageTargetsInWarehouse
         # Robots
         self.packagesMovingList = packagesMovingList
@@ -150,12 +122,11 @@ class Warehouse:
         self.warehouseWindowArray = self.windowArray
         self.warehousePerimeterCoordinates, self.warehousePerimeterCoordinatesMinusOne = Warehouse_Init.init_warehousePerimeter(self.windowRes)
         self.warehouseWindowRes, self.warehouseWindowCenter, self.packagesInWarehouse, self.robotsInWarehouse, self.chargersInWarehouse, self.idleAreasInWarehouse, self.packageTargetsInWarehouse = Warehouse_Init.init_warehouseWindow(self.windowRes, self.windowCenter)
-        self.space, self.demispace = Warehouse_Init.init_areasSpace(self.numberOfLanes, self.packageDimensionsLimit)
-        self.heightOfImportFloor, self.heightOfStorageFloor, self.heightOfExportFloor = Warehouse_Init.init_floorsHeight(self.warehouseWindowRes)
-        #self.sizeOfImportAreas, self.sizeOfStorageAreas, self.sizeOfExportAreas = Warehouse_Init.init_areasSize()
-        #self.numberOfImportAreas, self.numberOfStorageAreas, self.numberOfExportAreas = Warehouse_Init.init_areasNumber(Warehouse_Init, self.heightOfImportFloor, self.heightOfStorageFloor, self.heightOfExportFloor, self.sizeOfImportAreas, self.sizeOfStorageAreas, self.sizeOfExportAreas, self.demispace, self.warehouseWindowRes)
-        self.sizeOfImportAreas, self.sizeOfStorageAreas, self.sizeOfExportAreas, self.importAreas, self.storageAreas, self.exportAreas = Warehouse_Init.init_areas(Warehouse_Init, self.numberOfImportAreas, self.numberOfStorageAreas, self.numberOfExportAreas, self.heightOfImportFloor, self.heightOfStorageFloor, self.heightOfExportFloor, self.space, self.warehouseWindowRes, self.warehouseWindowCenter)
-        self.packagesInImportAreas, self.packagesInStorageAreas, self.packagesInExportAreas, self.numberOfImportSlots, self.numberOfStorageSlots, self.numberOfExportSlots = Warehouse_Init.init_packagesInAreas(Warehouse_Init, self.numberOfImportAreas, self.packagesInImportAreas, self.sizeOfImportAreas, self.numberOfStorageAreas, self.packagesInStorageAreas, self.sizeOfStorageAreas,self.numberOfExportAreas, self.packagesInExportAreas, self.sizeOfExportAreas)
+        self.zoneMap = Warehouse_Init.init_zoneMap(self.warehouseWindowRes)
+        self.numberOfImportSlots  = int(np.count_nonzero(self.zoneMap == ZONE_IMPORT))
+        self.numberOfStorageSlots = int(np.count_nonzero(self.zoneMap == ZONE_STORAGE))
+        self.numberOfExportSlots  = int(np.count_nonzero(self.zoneMap == ZONE_EXPORT))
+        self.packagesMaxQuantity  = self.numberOfImportSlots + self.numberOfStorageSlots + self.numberOfExportSlots
         self.warehouse_data = Warehouse_Data(self.dataMaxLength)
     
     def update_warehouse(self):
@@ -167,7 +138,7 @@ class Warehouse:
         self.packages, self.packagesMoveList, self.packagesMovingList, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount, self.robots, self.robotsRollingCount, self.robotsTaskAssignmentList, self.robotsLog, self.chargers = self.update_robots() # Update robots
         self.packages = self.update_carried_packages()
         self.packages, self.packagesInImportCount, self.packagesInStorageCount, self.packagesInExportCount = self.update_packages_areas()
-        self.packagesInWarehouse, self.packagesInImportAreas, self.packagesInStorageAreas, self.packagesInExportAreas = self.update_packages_in_warehouse() # Update warehouse knowledge of packages
+        self.packagesInWarehouse = self.update_packages_in_warehouse() # Update warehouse knowledge of packages
         self.chargersInWarehouse = self.update_chargers_in_warehouse()
         self.robotsInWarehouse = self.update_robots_in_warehouse()
         self.importSpaceAvailable, self.storageSpaceAvailable, self.exportSpaceAvailable = self.update_space_available()
@@ -178,32 +149,10 @@ class Warehouse:
         return self
 
     def update_space_available(self):
-        # Planned Spaces
-        if (self.packagesPlannedInImportCount >= self.numberOfImportSlots):
-            self.importSpaceAvailable = False
-        else:
-            self.importSpaceAvailable = True
-        if (self.packagesPlannedInStorageCount >= self.numberOfStorageSlots):
-            self.storageSpaceAvailable = False
-        else:
-            self.storageSpaceAvailable = True
-        if (self.packagesPlannedInExportCount >= self.numberOfExportSlots):
-            self.exportSpaceAvailable = False
-        else:
-            self.exportSpaceAvailable = True
-        # Actual Spaces
-        if (self.packagesInImportCount >= self.numberOfImportSlots):
-            self.importSpaceAvailable = False
-        else:
-            self.importSpaceAvailable = True
-        if (self.packagesInStorageCount >= self.numberOfStorageSlots):
-            self.storageSpaceAvailable = False
-        else:
-            self.storageSpaceAvailable = True
-        if (self.packagesInExportCount >= self.numberOfExportSlots):
-            self.exportSpaceAvailable = False
-        else:
-            self.exportSpaceAvailable = True
+        # Space is available only if both planned and actual counts are below the limit
+        self.importSpaceAvailable = (self.packagesPlannedInImportCount < self.numberOfImportSlots) and (self.packagesInImportCount < self.numberOfImportSlots)
+        self.storageSpaceAvailable = (self.packagesPlannedInStorageCount < self.numberOfStorageSlots) and (self.packagesInStorageCount < self.numberOfStorageSlots)
+        self.exportSpaceAvailable = (self.packagesPlannedInExportCount < self.numberOfExportSlots) and (self.packagesInExportCount < self.numberOfExportSlots)
         return self.importSpaceAvailable, self.storageSpaceAvailable, self.exportSpaceAvailable
     
     def trim_logs(self):
@@ -238,11 +187,8 @@ class Warehouse:
             # Warehouse
             print("- warehouse:")
             packagesInWarehouseLen = np.count_nonzero(self.packagesInWarehouse)
-            packagesInImportLen = np.count_nonzero(self.packagesInImportAreas)
-            packagesInStorageLen = np.count_nonzero(self.packagesInStorageAreas)
-            packagesInExportLen = np.count_nonzero(self.packagesInExportAreas)
             print("- pInWarehouseCount: {}, pInWarehouse: {}".format(self.packagesInWarehouseCount, packagesInWarehouseLen))
-            print("- pInImport: {}&{}, pInStorage: {}&{}, pInExport: {}&{}".format(packagesInImportLen, self.packagesInImportCount, packagesInStorageLen, self.packagesInStorageCount, packagesInExportLen, self.packagesInExportCount))
+            print("- pInImport: {}, pInStorage: {}, pInExport: {}".format(self.packagesInImportCount, self.packagesInStorageCount, self.packagesInExportCount))
             print("- pPlannedInImport: {}. pPlannedInStorage: {}, pPlannedInExport: {}".format(self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount))
             print("- spacesInWarehouse: {}, {}, {}".format(self.importSpaceAvailable, self.storageSpaceAvailable, self.exportSpaceAvailable))
             # Packages
@@ -353,12 +299,12 @@ class Warehouse:
     def update_packages(self):
         #print("- importSpaceAvailable: {}".format(self.importSpaceAvailable))
         if self.importSpaceAvailable:
-            self.packagesRollingCount, self.packagesInImportCount, self.packagesInWarehouseCount, self.packages, self.packagesLog = Package_Functions.import_package(Package_Functions, self.importNumTries, self.importAreas, self.numberOfImportAreas, self.sizeOfImportAreas, self.packagesRollingCount, self.packagesInImportCount, self.packagesPlannedInImportCount, self.packagesInWarehouseCount, self.packagesInImportAreas, self.packagesInWarehouse, self.packageTargetsInWarehouse, self.packagesMaxQuantity, self.packages, self.packagesLog, self.itemsList, self.addressesList, self.datetimeNow) # Import package
+            self.packagesRollingCount, self.packagesInImportCount, self.packagesInWarehouseCount, self.packages, self.packagesLog = Package_Functions.import_package(Package_Functions, self.zoneMap, self.chargersInWarehouse, self.packagesRollingCount, self.packagesInImportCount, self.packagesInWarehouseCount, self.packagesInWarehouse, self.packageTargetsInWarehouse, self.packagesMaxQuantity, self.packages, self.packagesLog, self.itemsList, self.addressesList, self.datetimeNow) # Import package
         self.packages = self.update_packages_timeToDeadline(self.datetimeNow) # Update package timeToDeadline
         self.packages.sort(key=lambda x: x.deadline, reverse=False) # Sort packages by deadline
         self.packagesMoveList = self.sort_packagesMoveList_by_deadline()
         self.packagesMoveList, self.packages, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount = self.remove_immovables_from_packagesMoveList()
-        self.packagesMovelist, self.packages = self.append_to_packagesMoveList() # Add to packagesMoveList based on deadline
+        self.packagesMoveList, self.packages = self.append_to_packagesMoveList() # Add to packagesMoveList based on deadline
         self.packages, self.packageTargetsInWarehouse, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount = self.update_packages_targetLocation() # Decide to Move Package to Storage or Export
         self.packageTargetsInWarehouse = self.update_packageTargetsInWarehouse()
         self.packages = self.update_packages_colours(self.datetimeNow)
@@ -452,7 +398,6 @@ class Warehouse:
             packageStatus = self.packages[i].status
             packageArea = self.packages[i].area
             packageAreaTarget = self.packages[i].areaTarget
-            packageAreaLocationTarget = self.packages[i].areaLocationTarget
             packageXYLocationTarget = self.packages[i].xyLocationTarget
             if (packageNumber in self.packagesMoveList):
                 if (packageStatus == 'idle'):
@@ -460,33 +405,22 @@ class Warehouse:
                     # Try to store package in Export
                     if (movePackage == False) and (self.exportSpaceAvailable == True):
                         if (packageArea != 'export') and (packageAreaTarget != 'export'):
-                            movePackage, areaLocation, xyLocation = Package_Functions.try_packageTargetLocation(self.exportNumTries, self.exportAreas, self.numberOfExportAreas, self.sizeOfExportAreas, self.packagesInExportAreas, self.packagesInWarehouse, self.packageTargetsInWarehouse)
+                            movePackage, xyLocation = Package_Functions.try_packageTargetLocation(self.zoneMap, ZONE_EXPORT, self.packagesInWarehouse, self.packageTargetsInWarehouse, self.chargersInWarehouse)
                             if (movePackage == True):
                                 self.packages[i].areaTarget = 'export'
                                 self.packagesPlannedInExportCount += 1
                     # Try to store package in Storage
                     if (movePackage == False) and (self.storageSpaceAvailable == True):
                         if (packageArea != "storage") and (packageAreaTarget != 'storage'):
-                            movePackage, areaLocation, xyLocation = Package_Functions.try_packageTargetLocation(self.storageNumTries, self.storageAreas, self.numberOfStorageAreas, self.sizeOfStorageAreas, self.packagesInStorageAreas, self.packagesInWarehouse, self.packageTargetsInWarehouse)
+                            movePackage, xyLocation = Package_Functions.try_packageTargetLocation(self.zoneMap, ZONE_STORAGE, self.packagesInWarehouse, self.packageTargetsInWarehouse, self.chargersInWarehouse)
                             if (movePackage == True):
                                 self.packages[i].areaTarget = 'storage'
                                 self.packagesPlannedInStorageCount += 1
                     # Move the package (or take no action)
                     if (movePackage == True):
-                        self.packages[i].areaLocationTarget = areaLocation.copy()
                         self.packages[i].xyLocationTarget = xyLocation.copy()
                         self.packages[i].status = 'move planned'
                         self.packageTargetsInWarehouse[xyLocation[1]][xyLocation[0]] = 1
-                        #print('-----------------------')
-                        #print(self.packages[packageIndex].areaLocation)
-                        #print(self.packages[packageIndex].areaLocationTarget)
-                        #print(self.packages[packageIndex].xyLocation)
-                        #print(self.packages[packageIndex].xyLocationTarget)
-            #if (packageNumber not in self.packagesMoveList) and (movePackage == False):
-            #    self.packages[i].areaTarget = packageArea
-            #    self.packages[i].areaLocationTarget = packageAreaLocationTarget
-            #    self.packages[i].xyLocationTarget = packageXYLocationTarget
-            #    self.packages[i].status = "idle"
         return self.packages, self.packageTargetsInWarehouse, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount
 
     def update_packageTargetsInWarehouse(self):
@@ -525,44 +459,27 @@ class Warehouse:
 
     def update_packages_areas(self):
         if not self.packages:
-            return self.packages
+            return self.packages, self.packagesInImportCount, self.packagesInStorageCount, self.packagesInExportCount
+        zoneNames = {ZONE_IMPORT: 'import', ZONE_STORAGE: 'storage', ZONE_EXPORT: 'export'}
         for i in range(len(self.packages)):
-            if (0 <= self.packages[i].xyLocation[1] < self.heightOfImportFloor):
-                if self.packages[i].area != "import":
-                    if self.packages[i].area == "storage":
-                        self.packagesInStorageCount -= 1
-                        #self.packagesPlannedInStorageCount -= 1
-                    elif self.packages[i].area == "export":
-                        self.packagesInExportCount -= 1
-                        #self.packagesPlannedInExportCount -= 1
-                    self.packages[i].area = "import"
+            x, y = self.packages[i].xyLocation
+            zoneId = self.zoneMap[y][x]
+            newArea = zoneNames.get(zoneId)
+            if newArea and self.packages[i].area != newArea:
+                oldArea = self.packages[i].area
+                if oldArea == 'import':
+                    self.packagesInImportCount -= 1
+                elif oldArea == 'storage':
+                    self.packagesInStorageCount -= 1
+                elif oldArea == 'export':
+                    self.packagesInExportCount -= 1
+                self.packages[i].area = newArea
+                if newArea == 'import':
                     self.packagesInImportCount += 1
-                    #self.packagesPlannedInImportCount += 1
-                    #self.packages[i].colour[0] = 100
-            elif (self.heightOfImportFloor <= self.packages[i].xyLocation[1] < (self.heightOfImportFloor + self.heightOfStorageFloor)):
-                if self.packages[i].area != "storage":
-                    if self.packages[i].area == "import":
-                        self.packagesInImportCount -= 1
-                        #self.packagesPlannedInImportCount -= 1
-                    elif self.packages[i].area == "export":
-                        self.packagesInExportCount -= 1
-                        #self.packagesPlannedInExportCount -= 1
-                    self.packages[i].area = "storage"
+                elif newArea == 'storage':
                     self.packagesInStorageCount += 1
-                    #self.packagesPlannedInStorageCount += 1
-                    #self.packages[i].colour[0] = 150
-            elif ((self.heightOfImportFloor + self.heightOfStorageFloor) <= self.packages[i].xyLocation[1] < (self.heightOfImportFloor + self.heightOfStorageFloor + self.heightOfExportFloor)):
-                if self.packages[i].area != "export":
-                    if self.packages[i].area == "import":
-                        self.packagesInImportCount -= 1
-                        #self.packagesPlannedInImportCount -= 1
-                    elif self.packages[i].area == "storage":
-                        self.packagesInStorageCount -= 1
-                        #self.packagesPlannedInStorageCount -= 1
-                    self.packages[i].area = "export"
+                elif newArea == 'export':
                     self.packagesInExportCount += 1
-                    #self.packagesPlannedInExportCount += 1
-                    #self.packages[i].colour[0] = 200
         return self.packages, self.packagesInImportCount, self.packagesInStorageCount, self.packagesInExportCount
 
     def update_packages_colours(self, datetimeNow):
@@ -590,7 +507,7 @@ class Warehouse:
                 break
             try:
                 packageStatus = self.packages[i].status
-            except:
+            except IndexError:
                 break
             packageTimeToDeadline = self.packages[i].timeToDeadline
             packageArea = self.packages[i].area
@@ -611,28 +528,10 @@ class Warehouse:
     # Update Warehouse
     def update_packages_in_warehouse(self):
         self.packagesInWarehouse = np.zeros((self.warehouseWindowRes[1], self.warehouseWindowRes[0]), dtype = 'uint8')
-        self.packagesInImportAreas = np.zeros((self.numberOfImportAreas[0], self.numberOfImportAreas[1], self.sizeOfImportAreas[0]*self.sizeOfImportAreas[1]), dtype = 'uint8')
-        self.packagesInStorageAreas = np.zeros((self.numberOfStorageAreas[0], self.numberOfStorageAreas[1], self.sizeOfStorageAreas[0]*self.sizeOfStorageAreas[1]), dtype = 'uint8')
-        self.packagesInExportAreas = np.zeros((self.numberOfExportAreas[0], self.numberOfExportAreas[1], self.sizeOfExportAreas[0]*self.sizeOfExportAreas[1]), dtype = 'uint8')
         for i in range(len(self.packages)):
             packageXY = self.packages[i].xyLocation
             self.packagesInWarehouse[packageXY[1]][packageXY[0]] = 1
-            if (self.packages[i].area == "import"):
-                xyLocationWithinAreaBool, areasRowCol, areaIndex = Warehouse_Functions.convert_xyWarehouse_to_xyArea(Warehouse_Functions, self.importAreas, self.numberOfImportAreas, self.packages[i].xyLocation)
-                if (xyLocationWithinAreaBool == True):
-                    self.packagesInImportAreas[areasRowCol[0]][areasRowCol[1]][areaIndex] = 1
-                    #print("packagesInImportAreas: {}".format(self.packagesInImportAreas[areasRowCol[0]][areasRowCol[1]]))
-            elif (self.packages[i].area == "storage"):
-                xyLocationWithinAreaBool, areasRowCol, areaIndex = Warehouse_Functions.convert_xyWarehouse_to_xyArea(Warehouse_Functions, self.storageAreas, self.numberOfStorageAreas, self.packages[i].xyLocation)
-                if (xyLocationWithinAreaBool == True):
-                    self.packagesInStorageAreas[areasRowCol[0]][areasRowCol[1]][areaIndex] = 1
-                    #print("packagesInStorageAreas: {}".format(self.packagesInStorageAreas[areasRowCol[0]][areasRowCol[1]]))
-            elif (self.packages[i].area == "export"):
-                xyLocationWithinAreaBool, areasRowCol, areaIndex = Warehouse_Functions.convert_xyWarehouse_to_xyArea(Warehouse_Functions, self.exportAreas, self.numberOfExportAreas, self.packages[i].xyLocation)
-                if (xyLocationWithinAreaBool == True):
-                    self.packagesInExportAreas[areasRowCol[0]][areasRowCol[1]][areaIndex] = 1
-                    #print("packagesInExportAreas: {}".format(self.packagesInExportAreas[areasRowCol[0]][areasRowCol[1]]))
-        return self.packagesInWarehouse, self.packagesInImportAreas, self.packagesInStorageAreas, self.packagesInExportAreas
+        return self.packagesInWarehouse
     
     def update_robots_in_warehouse(self):
         self.robotsInWarehouse = np.zeros((self.warehouseWindowRes[1], self.warehouseWindowRes[0]), dtype = 'uint8')
@@ -678,7 +577,7 @@ class Warehouse:
 
     def update_chargers(self):
         # Import Charger
-        self.chargersRollingCount, self.chargers = Charger_Functions.import_charger(Charger_Functions, self.warehousePerimeterCoordinatesMinusOne, self.chargersRollingCount, self.chargersMaxQuantity, self.chargersInWarehouse, self.chargers)
+        self.chargersRollingCount, self.chargers = Charger_Functions.import_charger(Charger_Functions, self.warehousePerimeterCoordinatesMinusOne, self.chargersRollingCount, self.chargersMaxQuantity, self.chargersInWarehouse, self.chargers, self.packagesInWarehouse)
         return self.chargers, self.chargersRollingCount, self.chargersInWarehouse
 
     def update_robots_batteryPercent(self):
@@ -688,6 +587,19 @@ class Warehouse:
         return self.robots
     
     def update_robots_checkBattery(self):
+        # --- Reconcile charger reservations ---
+        # Build ground-truth set of charger locations currently claimed by robot action queues.
+        actively_claimed = set()
+        for r in self.robots:
+            for task in r.actionQueue:
+                if task[1] in ("move to charging station", "charging"):
+                    actively_claimed.add(tuple(task[0]))
+        # Any charger stuck in "charging planned" with no robot heading there is a stale
+        # reservation — free it so it can be reassigned.
+        for charger in self.chargers:
+            if charger.status == "charging planned" and tuple(charger.xyLocation) not in actively_claimed:
+                charger.status = "idle"
+        # --- End reconciliation ---
         for i in range(len(self.robots)):
             if self.robots[i].batteryPercent <= 20:
                 # ************* Make smarter logic for deciding to recharge or other
@@ -737,8 +649,15 @@ class Warehouse:
         return self.robots, self.robotsTaskAssignmentList, self.robotsLog, self.chargers, self.packagesMoveList
     
     def find_available_charger(self):
+        # Ground-truth: any charger location already in a robot's action queue is claimed,
+        # regardless of the charger's status field (guards against stale status).
+        claimed = set()
+        for r in self.robots:
+            for task in r.actionQueue:
+                if task[1] in ("move to charging station", "charging"):
+                    claimed.add(tuple(task[0]))
         for c in range(len(self.chargers)):
-            if (self.chargers[c].status == "idle"):
+            if self.chargers[c].status == "idle" and tuple(self.chargers[c].xyLocation) not in claimed:
                 return True, c
         return False, -1
 
@@ -839,8 +758,13 @@ class Warehouse:
                     chargingStationIndex = [i for i, x in enumerate(self.chargers) if x.chargerNumber == chargingStationNumber][0]
                     #print('- chargingStationLocation: {}'.format(chargingStationLocation))
                     if (self.robots[i].xyLocation == chargingStationLocation): # Just arriving at charging station
-                        self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_replace_task(i, "move to charging station", chargingStationLocation, "charging")
-                        self.chargers[chargingStationIndex].status = "charging"
+                        if chargingStation.status == "charging":
+                            # Another robot beat us to this charger; pop our task and let
+                            # checkBattery re-assign us to a different charger next tick.
+                            self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, "move to charging station")
+                        else:
+                            self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_replace_task(i, "move to charging station", chargingStationLocation, "charging")
+                            self.chargers[chargingStationIndex].status = "charging"
                         #chargingActionIndex = [i2 for i2, x in enumerate(self.robots[i].actionQueue) if "move to charging station" in x][0]
                         #self.robots[i].actionQueue.pop(chargingActionIndex)
                         #robotTaskAssignmentIndex = [x for x in self.robotsTaskAssignmentList if x[0] == i][0][0]
@@ -1002,14 +926,6 @@ class Warehouse:
             return packageNumber
         return -1
 
-    def find_robots_at_this_location(self, xyLocation):
-        
-        return
-    
-    def find_packages_at_this_location(self, xyLocation):
-        
-        return
-
     def package_dropoff(self, packageNumber):
         try:
             # Update Move & MovingLists
@@ -1029,7 +945,7 @@ class Warehouse:
             self.packages[packageIndex].status = "idle"
             self.packages[packageIndex].areaTarget = "none"
             self.packages[packageIndex].carrier = -1
-        except:
+        except (ValueError, IndexError):
             print("- packageNumber #{} does not exist in move/moving lists!".format(packageNumber))
             print("- packagesMoveList: {}".format(self.packagesMoveList))
             print("- packagesMovingList: {}".format(self.packagesMovingList))
@@ -1050,7 +966,6 @@ class Warehouse:
             self.packages[packageIndex].status = "error"
             self.packages[packageIndex].areaTarget = "none"
             self.packages[packageIndex].carrier = -1
-            time.sleep(10)
         return self.packagesMoveList, self.packagesMovingList, self.packages, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount
 
     def robot_insert_task(self, robotIndex, robotNewActionIndex, robotNewLocation, robotNewAction):
