@@ -10,8 +10,8 @@ A real-time autonomous warehouse simulation. Robots dynamically pick up, transpo
 
 - **Warehouse zones** — three horizontal bands (import / storage / export); packages enter via import and exit when exported from the export zone before their deadline.
 - **Packages** — each has a unique ID, real-time position & status, a deadline-to-export, colour-coded urgency, age tracking (`createdAt`), and a full import-to-export history log.
-- **Robots** — up to 80 robots, each with a priority-based action queue, dynamic battery depletion, automatic charging dispatch, age tracking (`createdAt`), and single-package carrying capacity.
-- **Chargers** — up to 30 charging stations spawned along the warehouse perimeter; robots are dispatched when battery ≤ 20 %. Charger exclusivity is enforced via action-queue ground-truth checks with per-tick stale-reservation reconciliation and an arrival guard.
+- **Robots** — up to 60 robots, each with a priority-based action queue, dynamic battery depletion, automatic charging dispatch, age tracking (`createdAt`), and single-package carrying capacity.
+- **Chargers** — up to 10 charging stations spawned along the warehouse perimeter; robots are dispatched when battery ≤ 20 %. Charger exclusivity is enforced via action-queue ground-truth checks with per-tick stale-reservation reconciliation and an arrival guard.
 - **Task scheduler** — the warehouse assigns packages to robots deadline-first, respects zone capacity, and avoids duplicate movement effort via `packagesMoveList` / `packagesMovingList`.
 - **Sim / draw decoupling** — simulation ticks at 40 Hz; display repaints at 20 fps independently to save CPU.
 - **Rolling chart histories** — 1 800 samples at 1 sample/s (~30 min), with a dynamic time-window that grows from 30 s to the full history length.
@@ -36,14 +36,14 @@ A real-time autonomous warehouse simulation. Robots dynamically pick up, transpo
 | Colour | Meaning |
 |--------|---------|
 | Dark green area | Import zone |
-| Dark red area | Storage zone |
-| Dark blue area | Export zone |
+| Dark blue area | Storage zone |
+| Dark red area | Export zone |
 | Teal dots (perimeter) | Charging stations |
 | White dots | Robots |
 | Grey dots | Idle packages |
 | Bright green dots | Packages with an assigned robot & target |
-| Dark blue dots | Package deadline < 60 s |
-| Light blue dots | Package deadline < 10 s (export zone) |
+| Dark blue dots | Export zone, idle, deadline 10–60 s |
+| Light blue dots | Export zone, idle, deadline < 10 s |
 | Orange dots | Overdue packages planned for movement |
 | Red dots | Overdue packages with no plan |
 
@@ -100,8 +100,8 @@ All key parameters live in two places:
 
 | Parameter | Default | Effect |
 |-----------|---------|--------|
-| `robotsMaxQuantity` | `80` | Max robots in simulation |
-| `chargersMaxQuantity` | `30` | Max charging stations |
+| `robotsMaxQuantity` | `60` | Max robots in simulation |
+| `chargersMaxQuantity` | `10` | Max charging stations |
 | `packagesMaxMoveQuantity` | `120` | Max packages in the delivery pipeline at once |
 | `robotsTaskAssignmentMaxQuantity` | `3` | Max queued tasks per robot |
 
@@ -146,12 +146,11 @@ robot_warehouse_sim/
 
 ## Known Issues
 
-- When a robot finishes charging and becomes idle without a new task, another robot can occupy the same charger cell simultaneously (no cell-reservation on departure).
-- When the export zone fills completely, already-planned package movements are not cancelled or re-prioritised in real time; robots may continue heading toward a full export zone until the next scheduler pass.
+- When the export zone fills completely, already-planned package movements are not cancelled or re-prioritised in real time; robots may continue heading toward a full export zone until the next scheduler pass. (See *Dynamic priority switching* in Future Directions.)
 
 ## Limitations
 
-- Import / storage / export zones must be rectangular and stacked horizontally. More complex area geometries are not currently supported.
+- Import / storage / export zones must be rectangular and stacked vertically (horizontal bands, top: import → middle: storage → bottom: export). More complex area geometries are not currently supported.
 - Windows-only: borderless window setup uses Win32 via `ctypes`.
 
 ## Future Directions
@@ -159,7 +158,7 @@ robot_warehouse_sim/
 ### Scheduling & Capacity Optimisation
 - Optimisation calculations for managing zone capacities, fleet sizes, and time-based throughput targets.
 - Dynamic priority switching when export is full: cancel or re-route in-flight package movements based on real-time zone capacities rather than waiting for the next scheduler tick.
-- Dynamically adaptive zone shapes — e.g., complex non-rectangular footprints (spirals, L-shapes, multi-level). In real life, a 3D helical layout could exploit gravity to move packages passively from import → storage → export.
+- Dynamically adaptive zone shapes and sizes — e.g., complex non-rectangular footprints (spirals, L-shapes, multi-level). In real life, a 3D helical layout could exploit gravity to move packages passively from import → storage → export.
 - Dispatch robots to the nearest available charger rather than any idle charger.
 - Allow swapping lower-priority packages out of export to unblock higher-priority ones.
 

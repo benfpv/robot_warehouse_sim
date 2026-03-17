@@ -752,7 +752,10 @@ class Warehouse:
                 if (self.robots[i].status == "move to charging station"):
                     robotTargetLocation = self.robots[i].actionQueue[0][0]
                     #print("- robotTargetLocation: {}".format(robotTargetLocation))
-                    chargingStation = [x for x in self.chargers if x.xyLocation == robotTargetLocation][0]
+                    _cs_matches = [x for x in self.chargers if x.xyLocation == robotTargetLocation]
+                    if not _cs_matches:
+                        continue  # charger moved or removed; skip safely
+                    chargingStation = _cs_matches[0]
                     chargingStationNumber = chargingStation.chargerNumber
                     chargingStationLocation = chargingStation.xyLocation
                     chargingStationIndex = [i for i, x in enumerate(self.chargers) if x.chargerNumber == chargingStationNumber][0]
@@ -779,7 +782,10 @@ class Warehouse:
                         #self.robotsLog.append(Robots_Log(self.robots[i].robotNumber, self.robots[i], 'charging', self.datetimeNow))
                 elif (self.robots[i].status == "charging"):
                     robotTargetLocation = self.robots[i].actionQueue[0][0]
-                    chargingStation = [x for x in self.chargers if x.xyLocation == robotTargetLocation][0]
+                    _cs_matches = [x for x in self.chargers if x.xyLocation == robotTargetLocation]
+                    if not _cs_matches:
+                        continue  # charger moved or removed; skip safely
+                    chargingStation = _cs_matches[0]
                     chargingStationNumber = chargingStation.chargerNumber
                     chargingStationLocation = chargingStation.xyLocation
                     chargingStationIndex = [i for i, x in enumerate(self.chargers) if x.chargerNumber == chargingStationNumber][0]
