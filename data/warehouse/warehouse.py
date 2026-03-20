@@ -133,6 +133,9 @@ class Warehouse:
         #self.printDebugInfo()
         self.datetimeNow = datetime.now() # Update datetime
         self.timeElapsed = time.time() - self.timeStart
+        self.update_zone_counts() # Recompute slot counts from zoneMap (supports dynamic zones)
+        self.invalidate_stale_targets() # Cancel in-flight moves whose targets no longer match zoneMap
+        self.recount_planned() # Authoritative recount of planned counts
         self.packages, self.packagesRollingCount, self.packagesInWarehouseCount, self.packagesLog, self.packageTargetsInWarehouse, self.packageExportCount, self.packageExportRollingCount = self.update_packages() # Update packages
         self.chargers, self.chargersRollingCount, self.chargersInWarehouse = self.update_chargers()
         self.packages, self.packagesMoveList, self.packagesMovingList, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount, self.robots, self.robotsRollingCount, self.robotsTaskAssignmentList, self.robotsLog, self.chargers = self.update_robots() # Update robots
@@ -147,6 +150,35 @@ class Warehouse:
         #self.printDebugInfo()
         self.warehouseLoopCount += 1
         return self
+
+    def update_zone_counts(self):
+        """Recompute slot counts from zoneMap. Supports dynamic zone changes."""
+        self.numberOfImportSlots  = int(np.count_nonzero(self.zoneMap == ZONE_IMPORT))
+        self.numberOfStorageSlots = int(np.count_nonzero(self.zoneMap == ZONE_STORAGE))
+        self.numberOfExportSlots  = int(np.count_nonzero(self.zoneMap == ZONE_EXPORT))
+        self.packagesMaxQuantity  = self.numberOfImportSlots + self.numberOfStorageSlots + self.numberOfExportSlots
+
+    def invalidate_stale_targets(self):
+        """Cancel in-flight moves whose target cells no longer match the intended zone."""
+        expected_zone = {'import': ZONE_IMPORT, 'storage': ZONE_STORAGE, 'export': ZONE_EXPORT}
+        for p in self.packages:
+            if p.status in ('move planned', 'carried') and p.areaTarget != 'none':
+                tx, ty = p.xyLocationTarget
+                actual = self.zoneMap[ty][tx]
+                if actual != expected_zone.get(p.areaTarget, -1):
+                    self.packageTargetsInWarehouse[ty][tx] = 0
+                    p.areaTarget = 'none'
+                    p.xyLocationTarget = p.xyLocation.copy()
+                    if p.status == 'move planned':
+                        p.status = 'idle'
+                    if p.packageNumber in self.packagesMoveList:
+                        self.packagesMoveList.remove(p.packageNumber)
+
+    def recount_planned(self):
+        """Authoritative recount of planned counts from package list."""
+        self.packagesPlannedInImportCount  = sum(1 for p in self.packages if p.areaTarget == 'import')
+        self.packagesPlannedInStorageCount = sum(1 for p in self.packages if p.areaTarget == 'storage')
+        self.packagesPlannedInExportCount  = sum(1 for p in self.packages if p.areaTarget == 'export')
 
     def update_space_available(self):
         # Space is available only if both planned and actual counts are below the limit
@@ -298,8 +330,16 @@ class Warehouse:
     # Update Packages
     def update_packages(self):
         #print("- importSpaceAvailable: {}".format(self.importSpaceAvailable))
-        if self.importSpaceAvailable:
-            self.packagesRollingCount, self.packagesInImportCount, self.packagesInWarehouseCount, self.packages, self.packagesLog = Package_Functions.import_package(Package_Functions, self.zoneMap, self.chargersInWarehouse, self.packagesRollingCount, self.packagesInImportCount, self.packagesInWarehouseCount, self.packagesInWarehouse, self.packageTargetsInWarehouse, self.packagesMaxQuantity, self.packages, self.packagesLog, self.itemsList, self.addressesList, self.datetimeNow) # Import package
+        # Determine spawn zone: prefer import, fall back to storage, then export
+        spawnZoneId = None
+        if self.importSpaceAvailable and self.numberOfImportSlots > 0:
+            spawnZoneId = ZONE_IMPORT
+        elif self.numberOfImportSlots == 0 and self.storageSpaceAvailable and self.numberOfStorageSlots > 0:
+            spawnZoneId = ZONE_STORAGE
+        elif self.numberOfImportSlots == 0 and self.numberOfStorageSlots == 0 and self.exportSpaceAvailable and self.numberOfExportSlots > 0:
+            spawnZoneId = ZONE_EXPORT
+        if spawnZoneId is not None:
+            self.packagesRollingCount, self.packagesInImportCount, self.packagesInWarehouseCount, self.packages, self.packagesLog = Package_Functions.import_package(Package_Functions, self.zoneMap, self.chargersInWarehouse, self.packagesRollingCount, self.packagesInImportCount, self.packagesInWarehouseCount, self.packagesInWarehouse, self.packageTargetsInWarehouse, self.packagesMaxQuantity, self.packages, self.packagesLog, self.itemsList, self.addressesList, self.datetimeNow, spawnZoneId=spawnZoneId) # Import package
         self.packages = self.update_packages_timeToDeadline(self.datetimeNow) # Update package timeToDeadline
         self.packages.sort(key=lambda x: x.deadline, reverse=False) # Sort packages by deadline
         self.packagesMoveList = self.sort_packagesMoveList_by_deadline()
@@ -383,6 +423,8 @@ class Warehouse:
                             addPackage = True
                         elif ((packageArea == "storage") and (self.exportSpaceAvailable == True)):
                             addPackage = True
+                        elif ((packageArea == "neutral") and ((self.storageSpaceAvailable == True) or (self.exportSpaceAvailable == True))):
+                            addPackage = True
                     if (addPackage == True):
                         self.packagesMoveList.append(packageNumber)
                 # Cut packagesMoveList Loop if exceeded packagesMaxMoveQuantity
@@ -458,28 +500,22 @@ class Warehouse:
         return self.packages
 
     def update_packages_areas(self):
-        if not self.packages:
-            return self.packages, self.packagesInImportCount, self.packagesInStorageCount, self.packagesInExportCount
+        """Authoritative recount: derive area and counts from zoneMap positions."""
         zoneNames = {ZONE_IMPORT: 'import', ZONE_STORAGE: 'storage', ZONE_EXPORT: 'export'}
-        for i in range(len(self.packages)):
-            x, y = self.packages[i].xyLocation
+        self.packagesInImportCount = 0
+        self.packagesInStorageCount = 0
+        self.packagesInExportCount = 0
+        for p in self.packages:
+            x, y = p.xyLocation
             zoneId = self.zoneMap[y][x]
-            newArea = zoneNames.get(zoneId)
-            if newArea and self.packages[i].area != newArea:
-                oldArea = self.packages[i].area
-                if oldArea == 'import':
-                    self.packagesInImportCount -= 1
-                elif oldArea == 'storage':
-                    self.packagesInStorageCount -= 1
-                elif oldArea == 'export':
-                    self.packagesInExportCount -= 1
-                self.packages[i].area = newArea
-                if newArea == 'import':
-                    self.packagesInImportCount += 1
-                elif newArea == 'storage':
-                    self.packagesInStorageCount += 1
-                elif newArea == 'export':
-                    self.packagesInExportCount += 1
+            p.area = zoneNames.get(zoneId, 'neutral')
+            if p.area == 'import':
+                self.packagesInImportCount += 1
+            elif p.area == 'storage':
+                self.packagesInStorageCount += 1
+            elif p.area == 'export':
+                self.packagesInExportCount += 1
+        self.packagesInWarehouseCount = len(self.packages)
         return self.packages, self.packagesInImportCount, self.packagesInStorageCount, self.packagesInExportCount
 
     def update_packages_colours(self, datetimeNow):
@@ -514,13 +550,12 @@ class Warehouse:
             packageAreaTarget = self.packages[i].areaTarget
             packageLocation = self.packages[i].xyLocation
             packageTargetLocation = self.packages[i].xyLocationTarget
-            if (packageArea == "export") and (packageTimeToDeadline < timedelta(seconds=0)) and (packageStatus == "idle"):
+            canExport = (packageArea == "export") or (self.numberOfExportSlots == 0)
+            if canExport and (packageTimeToDeadline < timedelta(seconds=0)) and (packageStatus == "idle"):
                 #print("- packageTimeToDeadline: {}".format(packageTimeToDeadline))
                 self.packages.pop(i)
                 self.packageExportCount += 1
                 self.packageExportRollingCount += 1
-                self.packagesInWarehouseCount -= 1
-                self.packagesInExportCount -= 1
                 i -= 1
             i += 1
         return self.packages, self.packageExportCount, self.packageExportRollingCount

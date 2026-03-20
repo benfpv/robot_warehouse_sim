@@ -50,6 +50,7 @@ class MainGame:
         self.composite_windowRes = (self.warehouse_windowRes[0] + self.sub_windowRes[0] * 3, self.warehouse_windowRes[1] + self.panel_h + self.chart_h)  # 800x575
         # Rolling history arrays for charts (1800 samples @ 1/sec ≈ 30 min)
         _H = 1800
+        self._hist_imported = np.zeros(_H, dtype=np.float32)
         self._hist_exported = np.zeros(_H, dtype=np.float32)
         self._hist_overdue  = np.zeros(_H, dtype=np.float32)
         self._hist_late     = np.zeros(_H, dtype=np.float32)  # cumulative ever-overdue count
@@ -471,6 +472,7 @@ class MainGame:
             mean_batt = float(np.mean([r.batteryPercent for r in self.warehouse.robots])) if self.warehouse.robots else 0.0
             need_charge = sum(1 for r in self.warehouse.robots if r.batteryPercent <= 20)
             charging    = sum(1 for r in self.warehouse.robots if r.status == "charging")
+            self._hist_imported = np.roll(self._hist_imported, -1); self._hist_imported[-1] = self.warehouse.packagesRollingCount
             self._hist_exported = np.roll(self._hist_exported, -1); self._hist_exported[-1] = self.warehouse.packageExportRollingCount
             self._hist_overdue  = np.roll(self._hist_overdue,  -1); self._hist_overdue[-1]  = overdue
             self._hist_late     = np.roll(self._hist_late,     -1); self._hist_late[-1]     = self._late_total
@@ -490,6 +492,7 @@ class MainGame:
                 "storage":  wh.packagesInStorageCount,
                 "expzone":  wh.packagesInExportCount,
                 "overdue":  overdue,
+                "tot_imp":  wh.packagesRollingCount,
                 "tot_late": self._late_total,
                 "batt":     mean_batt,
                 "need_chg": need_charge,
@@ -608,13 +611,14 @@ class MainGame:
                     cv2.line(arr, (int(xs[i]), int(ys[i])), (int(xs[i+1]), int(ys[i+1])), col, 1)
             canvas[y0:y1, x0:x1] = arr
 
-        # Chart 1: Exports & Tot Late share one y-scale; Overdue (instantaneous) on its own
-        mini_chart(0, w3, "Exports & Overdue",
-                   [(self._hist_exported, ( 80, 200,  80), "Exported"),
+        # Chart 1: Imported/Exports/Tot Late share one y-scale; Overdue (instantaneous) on its own
+        mini_chart(0, w3, "Imports, Exports & Overdue",
+                   [(self._hist_imported, (200, 160,  80), "Imported"),
+                    (self._hist_exported, ( 80, 200,  80), "Exported"),
                     (self._hist_late,     ( 60, 120, 220), "Tot Late"),
                     (self._hist_overdue,  ( 80,  80, 200), "Overdue")],
-                   shared_scale={"Exported", "Tot Late"},
-                   rates={"Exported": _r("export"), "Tot Late": _r("tot_late"), "Overdue": _r("overdue")})
+                   shared_scale={"Imported", "Exported", "Tot Late"},
+                   rates={"Imported": _r("tot_imp"), "Exported": _r("export"), "Tot Late": _r("tot_late"), "Overdue": _r("overdue")})
 
         # Chart 2: Zone capacity fill bars
         self._draw_zone_bars(canvas, w3, y0, w3 * 2, y1,

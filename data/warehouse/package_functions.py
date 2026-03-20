@@ -5,18 +5,24 @@ import numpy as np
 from data.warehouse.warehouse_log import *
 from data.warehouse.package import *
 
+# Zone constants (must match warehouse.py)
+ZONE_NONE = 0
+ZONE_IMPORT = 1
+ZONE_STORAGE = 2
+ZONE_EXPORT = 3
+
 
 class Package_Functions:
     """Helpers for spawning and positioning packages."""
 
-    def import_package(self, zoneMap, chargersInWarehouse, packagesRollingCount, packagesInImportCount, packagesInWarehouseCount, packagesInWarehouse, packageTargetsInWarehouse, packagesMaxQuantity, packages, packagesLog, itemsList, addressesList, datetimeNow):
-        """Attempt to spawn one new package in the import zone if capacity allows."""
+    def import_package(self, zoneMap, chargersInWarehouse, packagesRollingCount, packagesInImportCount, packagesInWarehouseCount, packagesInWarehouse, packageTargetsInWarehouse, packagesMaxQuantity, packages, packagesLog, itemsList, addressesList, datetimeNow, spawnZoneId=ZONE_IMPORT):
+        """Attempt to spawn one new package in the given zone if capacity allows."""
         if packagesInWarehouseCount < packagesMaxQuantity:
-            # Try to find space for import (zone 1 = import)
-            movePackage, xyLocation = self.try_packageTargetLocation(zoneMap, 1, packagesInWarehouse, packageTargetsInWarehouse, chargersInWarehouse)
-            # If there is space, generate + import package
+            movePackage, xyLocation = self.try_packageTargetLocation(zoneMap, spawnZoneId, packagesInWarehouse, packageTargetsInWarehouse, chargersInWarehouse)
             if (movePackage == True):
-                package = self.generate_package(xyLocation, itemsList, addressesList, packagesRollingCount)
+                zoneNames = {ZONE_IMPORT: 'import', ZONE_STORAGE: 'storage', ZONE_EXPORT: 'export'}
+                spawnArea = zoneNames.get(spawnZoneId, 'neutral')
+                package = self.generate_package(xyLocation, itemsList, addressesList, packagesRollingCount, area=spawnArea)
                 packages.append(package)
                 packagesLog.append(Packages_Log(packagesRollingCount, package, 'import', datetimeNow))
                 packagesRollingCount += 1
@@ -43,7 +49,7 @@ class Package_Functions:
         return True, [int(x), int(y)]
 
     @staticmethod
-    def generate_package(xyLocation, itemsList, addressesList, packageRollingCount):
+    def generate_package(xyLocation, itemsList, addressesList, packageRollingCount, area='import'):
         """Construct a new Package with randomised item, addresses, and deadline."""
         itemName = random.sample(sorted(itemsList), 1)[0]
         packageLog = []
@@ -71,7 +77,6 @@ class Package_Functions:
         #b = random.randint(1,254)
         #colour = [b, g, r]
         colour = [120, 120, 120]
-        area = 'import'
         areaTarget = "none"
         xyLocationTarget = xyLocation.copy()
         status = "idle"
