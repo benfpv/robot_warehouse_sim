@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import math
 import random
@@ -15,6 +16,7 @@ from data.warehouse.robot import *
 from data.draw.draw_warehouse import *
 from data.display.display_functions import *
 from data.paint.paint_handler import PaintHandler
+from data.paint.map_importer import MapImporter
 
 class MainGame:
     def __init__(self):
@@ -39,9 +41,29 @@ class MainGame:
         # Init Warehouse
         self.warehouse = Warehouse(self.warehouse_res, self.warehouse_windowBackgroundColour, self.warehouse_windowCenter, self.warehouse_windowArray, self.itemsList, self.addressesList)
 
-        # Zone painting
-        self.paint_handler = PaintHandler(self.warehouse, self.warehouse_res, self.warehouse_windowRes)
+        # Zone painting — targeting the zone-map sub-view (top-right panel)
+        # zone-map panel rect in composite: x = mw + sw*2, y = 0, w = sw, h = sh
+        _zone_view_rect = (
+            self.warehouse_windowRes[0] + self.sub_windowRes[0] * 2,  # x0
+            0,                                                          # y0
+            self.sub_windowRes[0],                                      # pw
+            self.sub_windowRes[1],                                      # ph
+        )
+        self.paint_handler = PaintHandler(self.warehouse, self.warehouse_res, _zone_view_rect)
         cv2.setMouseCallback("warehouse", self.paint_handler.on_mouse)
+
+        # Map importer: generate example on first run; auto-load zone_map.png if present
+        _example_path = "resources/zone_map_example.png"
+        if not os.path.exists(_example_path):
+            MapImporter.generate_example_png(_example_path, *self.warehouse_res)
+        _map_path = "resources/zone_map.png"
+        if os.path.exists(_map_path):
+            gw, gh = self.warehouse_res
+            _loaded = MapImporter.load(_map_path, gw, gh)
+            if _loaded is not None:
+                self.warehouse.zoneMap = _loaded
+                self.warehouse.update_zone_counts()
+                print("[main] Zone map applied from '{}'.".format(_map_path))
 
         # Temporary draw
         self.warehouseWindow = self.warehouse_windowArray.copy()
@@ -539,7 +561,7 @@ class MainGame:
         _outline(_cw3 * 2,    mh + ph,  cw,            mh + ph + ch) # chart 3
 
         # Paint mode HUD — bottom-right corner of main view
-        self.paint_handler.draw_hud(composite, mw, mh, _zfont)
+        self.paint_handler.draw_hud(composite, _zfont)
 
         cv2.imshow("warehouse", composite)
         key = cv2.waitKey(1) & 0xFF
