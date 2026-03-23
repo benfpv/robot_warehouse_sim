@@ -14,6 +14,7 @@ from data.warehouse.package import *
 from data.warehouse.robot import *
 from data.draw.draw_warehouse import *
 from data.display.display_functions import *
+from data.paint.paint_handler import PaintHandler
 
 class MainGame:
     def __init__(self):
@@ -37,6 +38,10 @@ class MainGame:
         self.addressesList = Importer.init_objectify_addresses_list(self.addressesList)
         # Init Warehouse
         self.warehouse = Warehouse(self.warehouse_res, self.warehouse_windowBackgroundColour, self.warehouse_windowCenter, self.warehouse_windowArray, self.itemsList, self.addressesList)
+
+        # Zone painting
+        self.paint_handler = PaintHandler(self.warehouse, self.warehouse_res, self.warehouse_windowRes)
+        cv2.setMouseCallback("warehouse", self.paint_handler.on_mouse)
 
         # Temporary draw
         self.warehouseWindow = self.warehouse_windowArray.copy()
@@ -533,8 +538,12 @@ class MainGame:
         _outline(_cw3,        mh + ph,  _cw3 * 2,     mh + ph + ch) # chart 2
         _outline(_cw3 * 2,    mh + ph,  cw,            mh + ph + ch) # chart 3
 
+        # Paint mode HUD — bottom-right corner of main view
+        self.paint_handler.draw_hud(composite, mw, mh, _zfont)
+
         cv2.imshow("warehouse", composite)
-        cv2.waitKey(1)
+        key = cv2.waitKey(1) & 0xFF
+        self.paint_handler.handle_key(key)
         return self
 
     def _draw_charts(self, canvas, y_off, ch, cw):
@@ -613,10 +622,10 @@ class MainGame:
 
         # Chart 1: Imported/Exports/Tot Late share one y-scale; Overdue (instantaneous) on its own
         mini_chart(0, w3, "Imports, Exports & Overdue",
-                   [(self._hist_imported, (200, 160,  80), "Imported"),
-                    (self._hist_exported, ( 80, 200,  80), "Exported"),
-                    (self._hist_late,     ( 60, 120, 220), "Tot Late"),
-                    (self._hist_overdue,  ( 80,  80, 200), "Overdue")],
+                   [(self._hist_imported, ( 60, 200,  60), "Imported"),   # green  – matches import zone
+                    (self._hist_exported, ( 60,  60, 200), "Exported"),   # red    – matches export zone
+                    (self._hist_late,     ( 40, 160, 240), "Tot Late"),   # orange – cumulative overdue
+                    (self._hist_overdue,  (180, 100, 240), "Overdue")],   # pink   – instantaneous overdue
                    shared_scale={"Imported", "Exported", "Tot Late"},
                    rates={"Imported": _r("tot_imp"), "Exported": _r("export"), "Tot Late": _r("tot_late"), "Overdue": _r("overdue")})
 

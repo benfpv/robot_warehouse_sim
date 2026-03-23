@@ -100,6 +100,8 @@ class Warehouse:
         self.packageTargetsInWarehouse = packageTargetsInWarehouse
         # Robots
         self.packagesMovingList = packagesMovingList
+        self.packagesReorgList = []          # pkg numbers needing priority re-scheduling after a zone change
+        self.pending_zone_changes = set()    # (gx,gy) cells painted this tick, consumed by reconcile
         self.robotsActionsList = robotsActionsList
         self.robots = robots #[robot#, battery%, actionQueue, robotLog, xyLoc, xyLocTarget, status]
         self.robotsLog = robotsLog
@@ -134,6 +136,7 @@ class Warehouse:
         self.datetimeNow = datetime.now() # Update datetime
         self.timeElapsed = time.time() - self.timeStart
         self.update_zone_counts() # Recompute slot counts from zoneMap (supports dynamic zones)
+        self.reconcile_zone_changes() # Process user-painted cells; partial-flush affected plans
         self.invalidate_stale_targets() # Cancel in-flight moves whose targets no longer match zoneMap
         self.recount_planned() # Authoritative recount of planned counts
         self.packages, self.packagesRollingCount, self.packagesInWarehouseCount, self.packagesLog, self.packageTargetsInWarehouse, self.packageExportCount, self.packageExportRollingCount = self.update_packages() # Update packages
@@ -173,6 +176,113 @@ class Warehouse:
                         p.status = 'idle'
                     if p.packageNumber in self.packagesMoveList:
                         self.packagesMoveList.remove(p.packageNumber)
+
+    def reconcile_zone_changes(self):
+        """Process cells painted by the user this tick.
+
+        Surgically retires only plans that touch changed cells, frees the
+        corresponding robot queue entries, and queues displaced packages onto
+        packagesReorgList for priority re-scheduling this tick.
+        No-ops immediately when no cells were painted.
+        """
+        if not self.pending_zone_changes:
+            return
+
+        changed_cells = self.pending_zone_changes
+        self.pending_zone_changes = set()
+
+        ZONE_NAMES      = {ZONE_NONE: 'neutral', ZONE_IMPORT: 'import',
+                           ZONE_STORAGE: 'storage', ZONE_EXPORT: 'export'}
+        PICKUP_ACTIONS  = {"move to target pickup location", "pick up target package"}
+        DROPOFF_ACTIONS = {"move to target dropoff location", "drop off target package"}
+
+        def _strip_robot_tasks(robot_number, action_set, location=None):
+            """Remove matching tasks from a robot's action queue and adjust counts."""
+            ri = next((j for j, r in enumerate(self.robots) if r.robotNumber == robot_number), None)
+            if ri is None:
+                return
+            r = self.robots[ri]
+            if location is not None:
+                new_q = [t for t in r.actionQueue
+                         if not (t[1] in action_set and t[0] == location)]
+            else:
+                new_q = [t for t in r.actionQueue if t[1] not in action_set]
+            removed = len(r.actionQueue) - len(new_q)
+            if removed:
+                r.actionQueue = new_q
+                ta_idx = next((j for j, x in enumerate(self.robotsTaskAssignmentList)
+                               if x[0] == robot_number), None)
+                if ta_idx is not None:
+                    self.robotsTaskAssignmentList[ta_idx][1] = max(
+                        0, self.robotsTaskAssignmentList[ta_idx][1] - removed)
+                r.status = r.actionQueue[0][1] if r.actionQueue else 'idle'
+
+        def _robots_with_pickup_at(location):
+            return [r.robotNumber for r in self.robots
+                    if any(t[0] == location and t[1] in PICKUP_ACTIONS
+                           for t in r.actionQueue)]
+
+        for p in self.packages:
+            px, py  = p.xyLocation
+            tx, ty  = p.xyLocationTarget
+            cur_chg = (px, py) in changed_cells
+            tgt_chg = (tx, ty) in changed_cells
+
+            if cur_chg and p.status == 'idle':
+                # Case A: idle package on repainted cell — reclassify area only
+                p.area = ZONE_NAMES.get(self.zoneMap[py][px], 'neutral')
+                if p.packageNumber not in self.packagesReorgList:
+                    self.packagesReorgList.append(p.packageNumber)
+
+            elif cur_chg and p.status == 'move planned':
+                # Case B: planned package on repainted cell — cancel plan + free inbound robot
+                self.packageTargetsInWarehouse[ty][tx] = 0
+                p.area = ZONE_NAMES.get(self.zoneMap[py][px], 'neutral')
+                p.areaTarget = 'none'
+                p.xyLocationTarget = p.xyLocation.copy()
+                p.status = 'idle'
+                if p.packageNumber in self.packagesMoveList:
+                    self.packagesMoveList.remove(p.packageNumber)
+                for rn in _robots_with_pickup_at([px, py]):
+                    _strip_robot_tasks(rn, PICKUP_ACTIONS, [px, py])
+                if p.packageNumber not in self.packagesReorgList:
+                    self.packagesReorgList.append(p.packageNumber)
+
+            elif tgt_chg and p.status == 'carried':
+                # Case C: robot carrying package to now-invalid target — abort carry
+                self.packageTargetsInWarehouse[ty][tx] = 0
+                p.areaTarget = 'none'
+                p.xyLocationTarget = p.xyLocation.copy()
+                p.status = 'idle'
+                if p.packageNumber in self.packagesMoveList:
+                    self.packagesMoveList.remove(p.packageNumber)
+                if p.packageNumber in self.packagesMovingList:
+                    self.packagesMovingList.remove(p.packageNumber)
+                if p.carrier not in (None, -1):
+                    _strip_robot_tasks(p.carrier, DROPOFF_ACTIONS)
+                    ri = next((j for j, r in enumerate(self.robots)
+                               if r.robotNumber == p.carrier), None)
+                    if ri is not None:
+                        self.robots[ri].carrying = -1
+                p.carrier = -1
+                if p.packageNumber not in self.packagesReorgList:
+                    self.packagesReorgList.append(p.packageNumber)
+
+            elif tgt_chg and p.status == 'move planned' and not cur_chg:
+                # Case D: assigned target now wrong zone — cancel plan + free inbound robot
+                self.packageTargetsInWarehouse[ty][tx] = 0
+                p.areaTarget = 'none'
+                p.xyLocationTarget = p.xyLocation.copy()
+                p.status = 'idle'
+                if p.packageNumber in self.packagesMoveList:
+                    self.packagesMoveList.remove(p.packageNumber)
+                for rn in _robots_with_pickup_at([px, py]):
+                    _strip_robot_tasks(rn, PICKUP_ACTIONS, [px, py])
+                if p.packageNumber not in self.packagesReorgList:
+                    self.packagesReorgList.append(p.packageNumber)
+
+        self.recount_planned()
+        self.robotsTaskAssignmentList.sort(key=lambda y: y[1], reverse=False)
 
     def recount_planned(self):
         """Authoritative recount of planned counts from package list."""
@@ -408,6 +518,18 @@ class Warehouse:
         return self.packagesMoveList, self.packages, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount
 
     def append_to_packagesMoveList(self):
+        # Drain reorg list first — displaced packages get front-of-queue priority
+        for pkg_num in list(self.packagesReorgList):
+            pkg_idx = next((i for i, p in enumerate(self.packages)
+                            if p.packageNumber == pkg_num), None)
+            if pkg_idx is not None:
+                p = self.packages[pkg_idx]
+                if (p.status == 'idle' and p.area != 'export'
+                        and pkg_num not in self.packagesMoveList
+                        and pkg_num not in self.packagesMovingList
+                        and len(self.packagesMoveList) < self.packagesMaxMoveQuantity):
+                    self.packagesMoveList.insert(0, pkg_num)
+        self.packagesReorgList.clear()
         # Add package to packagesMoveList if there is enough bandwidth
         if (len(self.packagesMoveList) < self.packagesMaxMoveQuantity):
             for i in range(len(self.packages)):
