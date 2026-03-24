@@ -257,9 +257,13 @@ class MainGame:
         pkg_tgt_img[tgt_resized > 0] = (255, 255, 255)
         composite[sh:2*sh, mw+sw:mw+2*sw] = pkg_tgt_img
 
-        # Zone map (top-right)
+        # Zone map (top-right) — reserve BUTTON_H at bottom and BRUSH_W on right
+        _btn_h   = self.paint_handler.BUTTON_H
+        _brush_w = self.paint_handler.BRUSH_W
+        _map_w   = sw - _brush_w
+        _map_h   = sh - _btn_h
         zoneMap_display = Draw_Warehouse.draw_zoneMap_display(self.warehouse.zoneMap, zone_colours)
-        composite[0:sh, mw+sw*2:mw+sw*3] = cv2.resize(zoneMap_display, (sw, sh), interpolation=cv2.INTER_NEAREST)
+        composite[0:_map_h, mw+sw*2:mw+sw*2+_map_w] = cv2.resize(zoneMap_display, (_map_w, _map_h), interpolation=cv2.INTER_NEAREST)
 
         # Sub-view title overlays (drawn onto composite after all sub-views are placed)
         _tfont = cv2.FONT_HERSHEY_SIMPLEX
@@ -295,20 +299,6 @@ class MainGame:
             _bright = tuple(min(int(c * 2.5), 255) for c in _zcol)
             cv2.rectangle(composite, (4, _ly - 7), (12, _ly - 1), _bright, -1)
             cv2.putText(composite, _zlbl, (15, _ly), _zfont, 0.32, (200, 200, 200), 1)
-
-        # Legend box on zone sub-view (bottom-left corner) – semi-transparent bg
-        _leg_y2 = sh - 10 - len(_zone_info) * 11
-        _zbg_y0 = max(0, _leg_y2 - 2)
-        _zbg_y1 = min(sh, _leg_y2 + len(_zone_info) * 11 + 3)
-        _ox = mw + sw * 2
-        _zbg_x0, _zbg_x1 = _ox + 1, _ox + 42
-        _zroi = composite[_zbg_y0:_zbg_y1, _zbg_x0:_zbg_x1]
-        composite[_zbg_y0:_zbg_y1, _zbg_x0:_zbg_x1] = (_zroi * 0.35).astype(np.uint8)
-        for _li, (_zid, _zlbl, _zcol) in enumerate(_zone_info):
-            _ly = _leg_y2 + _li * 11 + 9
-            _bright = tuple(min(int(c * 2.5), 255) for c in _zcol)
-            cv2.rectangle(composite, (_ox + 3, _ly - 6), (_ox + 9, _ly - 1), _bright, -1)
-            cv2.putText(composite, _zlbl, (_ox + 12, _ly), _zfont, 0.25, (200, 200, 200), 1)
 
         # Bottom-right sub-view: sim stats
         stats_img = np.zeros((sh, sw, 3), dtype=np.uint8)
@@ -586,8 +576,8 @@ class MainGame:
         _outline(_cw3,        mh + ph,  _cw3 * 2,     mh + ph + ch) # chart 2
         _outline(_cw3 * 2,    mh + ph,  cw,            mh + ph + ch) # chart 3
 
-        # Paint mode HUD — bottom-right corner of main view
-        self.paint_handler.draw_hud(composite, _zfont)
+        # Zone-map panel controls (zone buttons at bottom, brush sizes on right)
+        self.paint_handler.draw_buttons(composite, _zfont)
 
         cv2.imshow("warehouse", composite)
         key = cv2.waitKey(1) & 0xFF

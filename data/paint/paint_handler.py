@@ -9,16 +9,17 @@ ZONE_EXPORT  = 3
 
 
 class PaintHandler:
-    """Handles user zone-painting input and the associated HUD overlay.
+    """Handles user zone-painting input and on-screen zone-map panel controls.
 
     Painting mutates warehouse.zoneMap and populates warehouse.pending_zone_changes
     for reconciliation on the next sim tick.
 
     Controls:
-        Left-drag  — paint active zone
-        Right-drag — erase (zone 0 / neutral)
-        Keys 1/2/3 — select Import / Storage / Export
-        Key  0     — select Erase mode
+        Left-drag                — paint active zone
+        Right-drag               — erase (zone 0 / neutral)
+        Zone buttons (bottom)    — select zone / erase
+        Brush buttons (right)    — select brush size (1 / 3 / 5)
+        Key L                    — hot-reload all map PNGs from disk
     """
 
     ZONE_NAMES = {
@@ -35,6 +36,24 @@ class PaintHandler:
         ZONE_EXPORT:  ( 60,  60, 200),
     }
 
+    # Height (px) of the zone-button strip at the bottom of the zone-map panel.
+    BUTTON_H = 16
+    # Width (px) of the vertical brush-size strip on the right of the zone-map panel.
+    BRUSH_W  = 16
+    # Zone/erase buttons (bottom strip, full panel width) — (zone_id, short label)
+    _BUTTONS = [
+        (ZONE_NONE,    'CLR'),
+        (ZONE_IMPORT,  'IMP'),
+        (ZONE_STORAGE, 'STO'),
+        (ZONE_EXPORT,  'EXP'),
+    ]
+    # Brush sizes (right vertical strip) — (grid-cell side length, label)
+    _BRUSH_SIZES = [
+        (1, '1'),
+        (3, '3'),
+        (5, '5'),
+    ]
+
     def __init__(self, warehouse, warehouse_res, zone_view_rect):
         """
         Args:
@@ -47,41 +66,105 @@ class PaintHandler:
         self.warehouse_res  = warehouse_res   # grid dims (gw, gh)
         self.zone_view_rect = zone_view_rect  # (x0, y0, pw, ph) of zone-map panel
         self.paint_zone     = ZONE_IMPORT     # active zone; 0 = erase
+        self.brush_size     = 1              # current brush side length (1, 3, or 5)
+        self._last_left_cell  = None          # (gx, gy) of last L-button painted cell
+        self._last_right_cell = None          # (gx, gy) of last R-button erased cell
 
     # ── Input ──────────────────────────────────────────────────────────
 
     def on_mouse(self, event, px, py, flags, param):
-        """cv2 mouse callback — paints grid cells when the cursor is over the zone-map panel."""
+        """cv2 mouse callback — paints grid cells or selects zone / brush via
+        the button strip (bottom) and brush strip (right) of the zone-map panel."""
+        vx0, vy0, vw, vh = self.zone_view_rect
+        map_w   = vw - self.BRUSH_W          # paintable map width  (px)
+        map_h   = vh - self.BUTTON_H          # paintable map height (px)
+        brush_x = vx0 + map_w                 # left edge of brush strip
+        btn_y0  = vy0 + map_h                 # top edge of zone button strip
+
+        # ── Brush strip click (right vertical strip) ──────────────────
+        if (event == cv2.EVENT_LBUTTONDOWN
+                and brush_x <= px < vx0 + vw
+                and vy0 <= py < btn_y0):
+            n = len(self._BRUSH_SIZES)
+            idx = int((py - vy0) * n / max(map_h, 1))
+            self.brush_size = self._BRUSH_SIZES[max(0, min(idx, n - 1))][0]
+            return
+
+        # ── Zone button strip click (full-width bottom strip) ─────────
+        if (event == cv2.EVENT_LBUTTONDOWN
+                and vx0 <= px < vx0 + vw
+                and btn_y0 <= py < vy0 + vh):
+            n = len(self._BUTTONS)
+            idx = int((px - vx0) * n / vw)
+            self.paint_zone = self._BUTTONS[max(0, min(idx, n - 1))][0]
+            return
+
+        # ── Paint / erase in the map area ────────────────────────────
         is_paint = (event in (cv2.EVENT_LBUTTONDOWN, cv2.EVENT_MOUSEMOVE)
                     and bool(flags & cv2.EVENT_FLAG_LBUTTON))
         is_erase = (event in (cv2.EVENT_RBUTTONDOWN, cv2.EVENT_MOUSEMOVE)
                     and bool(flags & cv2.EVENT_FLAG_RBUTTON))
+
+        # Reset stroke tracking when the button is released
+        if event == cv2.EVENT_LBUTTONUP:
+            self._last_left_cell = None
+            return
+        if event == cv2.EVENT_RBUTTONUP:
+            self._last_right_cell = None
+            return
+
         if not (is_paint or is_erase):
             return
-        vx0, vy0, vw, vh = self.zone_view_rect
-        # Only act when the cursor is inside the zone-map panel
-        if not (vx0 <= px < vx0 + vw and vy0 <= py < vy0 + vh):
+        if not (vx0 <= px < brush_x and vy0 <= py < btn_y0):
+            # Leaving the paint area resets the relevant button's last position
+            if is_paint: self._last_left_cell  = None
+            if is_erase: self._last_right_cell = None
             return
         gw, gh = self.warehouse_res
-        gx = int((px - vx0) * gw / vw)
-        gy = int((py - vy0) * gh / vh)
+        gx = int((px - vx0) * gw / map_w)
+        gy = int((py - vy0) * gh / map_h)
         if not (0 <= gx < gw and 0 <= gy < gh):
             return
         zone_id = self.paint_zone if is_paint else ZONE_NONE
-        self.warehouse.zoneMap[gy][gx] = zone_id
-        self.warehouse.pending_zone_changes.add((gx, gy))
+
+        # Paint every cell along the line from the last position to the current one
+        # (Bresenham) so fast mouse movement never leaves gaps.
+        if is_paint:
+            start = self._last_left_cell if self._last_left_cell is not None else (gx, gy)
+            self._last_left_cell = (gx, gy)
+        else:
+            start = self._last_right_cell if self._last_right_cell is not None else (gx, gy)
+            self._last_right_cell = (gx, gy)
+        r = self.brush_size // 2
+        for cx, cy in self._bresenham(start[0], start[1], gx, gy):
+            for bx in range(cx - r, cx + r + 1):
+                for by in range(cy - r, cy + r + 1):
+                    if 0 <= bx < gw and 0 <= by < gh:
+                        self.warehouse.zoneMap[by][bx] = zone_id
+                        self.warehouse.pending_zone_changes.add((bx, by))
+
+    @staticmethod
+    def _bresenham(x0, y0, x1, y1):
+        """Yield all grid cells on the line from (x0,y0) to (x1,y1) inclusive."""
+        dx = abs(x1 - x0); dy = abs(y1 - y0)
+        sx = 1 if x1 > x0 else -1
+        sy = 1 if y1 > y0 else -1
+        err = dx - dy
+        while True:
+            yield (x0, y0)
+            if x0 == x1 and y0 == y1:
+                break
+            e2 = 2 * err
+            if e2 > -dy: err -= dy; x0 += sx
+            if e2 <  dx: err += dx; y0 += sy
 
     def handle_key(self, key):
-        """Update active paint zone from a keypress.
+        """Handle utility keypresses not covered by the on-screen buttons.
 
         Returns True if the key was consumed, False otherwise.
-        Keys: 1=Import  2=Storage  3=Export  0=Erase  L=reload zone_map.png
+        Key L — hot-reload all map PNGs from disk.
         """
-        if   key == ord('1'): self.paint_zone = ZONE_IMPORT;  return True
-        elif key == ord('2'): self.paint_zone = ZONE_STORAGE; return True
-        elif key == ord('3'): self.paint_zone = ZONE_EXPORT;  return True
-        elif key == ord('0'): self.paint_zone = ZONE_NONE;    return True
-        elif key == ord('l'):
+        if key == ord('l'):
             from data.paint.map_importer import MapImporter
             gw, gh = self.warehouse_res
             # Zone map
@@ -109,24 +192,69 @@ class PaintHandler:
             return True
         return False
 
-    # ── HUD ────────────────────────────────────────────────────────────
+    # ── Buttons ────────────────────────────────────────────────────────
 
-    def draw_hud(self, composite, font):
-        """Draw the PAINT: <ZONE> indicator in the bottom-right corner of the zone-map panel.
+    def draw_buttons(self, composite, font):
+        """Draw controls around the zone-map panel.
+
+        Layout (within the zone_view_rect panel):
+          Right  BRUSH_W px (top to btn_y0):  vertical brush size selectors — 1 / 3 / 5
+          Bottom BUTTON_H px (full width):     zone / erase selectors       — CLR|IMP|STO|EXP
 
         Args:
             composite: composite BGR image (mutated in-place).
-            font:      cv2 font constant.
+            font:      cv2 font constant (FONT_HERSHEY_SIMPLEX).
         """
         vx0, vy0, vw, vh = self.zone_view_rect
-        lbl     = "PAINT: {}".format(self.ZONE_NAMES.get(self.paint_zone, '?'))
-        col_raw = self.ZONE_COLS.get(self.paint_zone, (180, 180, 180))
-        col     = tuple(min(int(c * 1.5), 255) for c in col_raw)
-        (tw, th), _ = cv2.getTextSize(lbl, font, 0.30, 1)
-        bx0 = vx0 + vw - tw - 7
-        bx1 = vx0 + vw - 1
-        by0 = vy0 + vh - th - 5
-        by1 = vy0 + vh - 1
-        roi = composite[by0:by1, bx0:bx1]
-        composite[by0:by1, bx0:bx1] = (roi * 0.3).astype(np.uint8)
-        cv2.putText(composite, lbl, (vx0 + vw - tw - 4, vy0 + vh - 4), font, 0.30, col, 1)
+        btn_h   = self.BUTTON_H
+        brush_w = self.BRUSH_W
+        map_w   = vw - brush_w
+        map_h   = vh - btn_h
+        btn_y0  = vy0 + map_h             # top of zone button strip
+        brush_x = vx0 + map_w             # left of brush strip
+
+        # ── Zone / erase buttons (bottom strip, full width) ──────────
+        composite[btn_y0:vy0 + vh, vx0:vx0 + vw] = (18, 18, 18)
+        composite[btn_y0, vx0:vx0 + vw]           = (48, 48, 48)    # top border
+
+        n_z = len(self._BUTTONS)
+        for i, (zone_id, label) in enumerate(self._BUTTONS):
+            bx0 = vx0 + i * vw // n_z
+            bx1 = vx0 + (i + 1) * vw // n_z
+            active = (self.paint_zone == zone_id)
+            if active:
+                col = self.ZONE_COLS[zone_id]
+                bg  = tuple(max(int(c * 0.22), 0) for c in col) if any(col) else (34, 34, 34)
+                composite[btn_y0 + 2:vy0 + vh, bx0:bx1] = bg
+                composite[btn_y0:btn_y0 + 2, bx0:bx1]   = col
+                text_col = tuple(min(int(c * 1.4), 255) for c in col)
+            else:
+                text_col = (55, 55, 55)
+            if i < n_z - 1:
+                composite[btn_y0:vy0 + vh, bx1 - 1:bx1] = (36, 36, 36)
+            (tw, th), _ = cv2.getTextSize(label, font, 0.22, 1)
+            tx = bx0 + (bx1 - bx0 - tw) // 2
+            ty = btn_y0 + (btn_h + th) // 2
+            cv2.putText(composite, label, (tx, ty), font, 0.22, text_col, 1)
+
+        # ── Brush size buttons (right vertical strip) ────────────────
+        composite[vy0:btn_y0, brush_x:vx0 + vw] = (18, 18, 18)
+        composite[vy0:btn_y0, brush_x:brush_x + 1] = (48, 48, 48)  # left border
+
+        n_b = len(self._BRUSH_SIZES)
+        for i, (size, label) in enumerate(self._BRUSH_SIZES):
+            by0 = vy0 + i * map_h // n_b
+            by1 = vy0 + (i + 1) * map_h // n_b
+            active = (self.brush_size == size)
+            if active:
+                composite[by0:by1, brush_x + 2:vx0 + vw] = (36, 36, 44)
+                composite[by0:by1, brush_x:brush_x + 2]   = (130, 130, 170)
+                text_col = (190, 190, 215)
+            else:
+                text_col = (55, 55, 55)
+            if i < n_b - 1:
+                composite[by1 - 1:by1, brush_x:vx0 + vw] = (36, 36, 36)
+            (tw, th), _ = cv2.getTextSize(label, font, 0.22, 1)
+            tx = brush_x + (brush_w - tw) // 2
+            ty = by0 + (by1 - by0 + th) // 2
+            cv2.putText(composite, label, (tx, ty), font, 0.22, text_col, 1)
