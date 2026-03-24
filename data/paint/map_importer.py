@@ -275,52 +275,189 @@ class MapImporter:
         cw2, ch2 = gw * cell_px, gh * cell_px
         print("[MapImporter] Default map written: {}  ({}×{} px)".format(path, cw2, ch2))
 
+    # ── Sunflower zone map generator ───────────────────────────────────
+
+    @classmethod
+    def generate_sunflower_map(cls, path, gw=80, gh=70, cell_px=8,
+                               outer_frac=0.90):
+        """Write a phyllotaxis / sunflower zone-map PNG to *path*.
+
+        Seed positions follow Vogel's golden-angle formula with n=377 seeds
+        (a Fibonacci number), which encodes 21 CW and 34 CCW visible spiral
+        arms — the two consecutive Fibonacci numbers for this seed count.
+        Each grid cell is assigned to its nearest seed (Voronoi), so every
+        seed becomes one distinct rhombic section.
+
+        Zone boundaries follow Fibonacci spiral arms via arm modulation:
+          arm_mod = sin(2π·i%21/21) × sin(2π·i%34/34)
+        This peaks at the centre of each rhombus and dips at arm crossings,
+        causing zone boundaries to zigzag along the spiral arms.
+
+        Zone proportions are enforced by assigning seeds in ascending gravity
+        order, accumulating *grid cell counts* (not seed counts) until the
+        target area fraction is met.  This corrects for inner seeds having
+        larger Voronoi cells than outer seeds.
+
+        Gravity ordering:
+            Import  — outer ring / top    (≈20 % of active disk area)
+            Storage — middle annular band (≈31 %)
+            Export  — inner core / bottom (≈49 %)
+        """
+        golden_angle = np.pi * (3.0 - np.sqrt(5.0))   # ≈ 137.508°
+        n_seeds      = 377       # Fibonacci → 21-CW + 34-CCW visible spiral arms
+        F_cw, F_ccw  = 21, 34
+
+        cx, cy = (gw - 1) / 2.0, (gh - 1) / 2.0
+        max_r  = min(cx, cy)
+
+        # ── Vogel seed positions ──────────────────────────────────────────
+        idx    = np.arange(0, n_seeds, dtype=float)
+        r_norm = np.sqrt(idx / max(n_seeds - 1, 1))         # 0 .. 1
+        theta  = idx * golden_angle
+        seed_x = cx + r_norm * outer_frac * max_r * np.cos(theta)
+        seed_y = cy + r_norm * outer_frac * max_r * np.sin(theta)
+
+        # ── Voronoi assignment ────────────────────────────────────────────
+        ys, xs  = np.mgrid[0:gh, 0:gw].astype(float)
+        flat_x  = xs.ravel()
+        flat_y  = ys.ravel()
+        dx = flat_x[:, np.newaxis] - seed_x[np.newaxis, :]  # (gh*gw, n_seeds)
+        dy = flat_y[:, np.newaxis] - seed_y[np.newaxis, :]
+        nearest  = np.argmin(dx**2 + dy**2, axis=1).reshape(gh, gw)
+
+        # ── In-disk mask (for area calculations) ─────────────────────────
+        r_grid   = np.sqrt((xs - cx)**2 + (ys - cy)**2) / max_r
+        in_disk  = r_grid < outer_frac * 1.01
+
+        # ── Per-seed gravity: mean gravity of their in-disk cells ─────────
+        # Using grid-cell-level gravity weights area correctly — inner seeds
+        # naturally contribute more cells and thus more weight, matching the
+        # proportion of grid cells each zone will receive.
+        y_grid        = ys / (gh - 1)                       # 0=top, 1=bottom
+        cell_gravity  = (1.0 - r_grid) * 0.4 + y_grid * 0.6
+
+        flat_nearest  = nearest.ravel()
+        flat_gravity  = cell_gravity.ravel()
+        flat_in_disk  = in_disk.ravel()
+        valid_idx     = flat_nearest[flat_in_disk]
+        valid_grav    = flat_gravity[flat_in_disk]
+
+        grav_sum   = np.bincount(valid_idx, weights=valid_grav, minlength=n_seeds)
+        cell_count = np.bincount(valid_idx, minlength=n_seeds)
+        seed_grav  = np.where(cell_count > 0, grav_sum / (cell_count + 1e-9), 0.0)
+
+        # ── Fibonacci arm modulation ──────────────────────────────────────
+        # sin(2π·i%F_cw/F_cw) × sin(2π·i%F_ccw/F_ccw) peaks at the centre
+        # of each rhombic "seed diamond", causing zone edges to follow
+        # the 21/34 Fibonacci spiral arms rather than a smooth oval.
+        arm_cw  = np.sin(2.0 * np.pi * (idx % F_cw)  / F_cw)
+        arm_ccw = np.sin(2.0 * np.pi * (idx % F_ccw) / F_ccw)
+        score   = seed_grav + 0.08 * (arm_cw * arm_ccw)    # ∈ rough [0, 1]
+
+        # ── Zone assignment by cumulative grid-cell area ──────────────────
+        # Sort seeds ascending (low score = outer/top = Import first).
+        # Walk the sorted list, accumulating their cell counts, and flip the
+        # zone label when the running total crosses each target threshold.
+        # This guarantees the desired grid-cell proportions regardless of
+        # how cell sizes vary across radii.
+        total_cells    = int(flat_in_disk.sum())
+        import_ceiling = int(total_cells * 0.20)
+        storage_ceil   = import_ceiling + int(total_cells * 0.31)
+
+        seed_zone  = np.full(n_seeds, ZONE_EXPORT, dtype='uint8')
+        cumcells   = 0
+        for si in np.argsort(score):
+            nc = cell_count[si]
+            if cumcells < import_ceiling:
+                seed_zone[si] = ZONE_IMPORT
+            elif cumcells < storage_ceil:
+                seed_zone[si] = ZONE_STORAGE
+            # else: remains ZONE_EXPORT (default)
+            cumcells += nc
+
+        # ── Build zone_map, mask outer fringe and perimeter ──────────────
+        zone_map = seed_zone[nearest]
+        zone_map[~in_disk] = ZONE_NONE
+        zone_map[:2, :]  = ZONE_NONE
+        zone_map[-2:, :] = ZONE_NONE
+        zone_map[:, :2]  = ZONE_NONE
+        zone_map[:, -2:] = ZONE_NONE
+
+        # ── Render ────────────────────────────────────────────────────────
+        zone_img = np.zeros((gh, gw, 3), dtype='uint8')
+        for zid, col in {
+            ZONE_NONE:    (  0,   0,   0),
+            ZONE_IMPORT:  (  0, 180,   0),
+            ZONE_STORAGE: (220,   0,   0),
+            ZONE_EXPORT:  (  0,   0, 220),
+        }.items():
+            zone_img[zone_map == zid] = col
+
+        img = cv2.resize(zone_img, (gw * cell_px, gh * cell_px),
+                         interpolation=cv2.INTER_NEAREST)
+
+        out_dir = os.path.dirname(os.path.abspath(path))
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        cv2.imwrite(path, img)
+        counts = {v: int(np.count_nonzero(zone_map == v)) for v in [1, 2, 3]}
+        cw2, ch2 = gw * cell_px, gh * cell_px
+        print("[MapImporter] Sunflower map written: {}  ({}×{} px), slots: {}".format(
+            path, cw2, ch2, counts))
+
     # ── Spiral / black-hole zone map generator ─────────────────────────
 
     @classmethod
     def generate_spiral_map(cls, path, gw=80, gh=70, cell_px=8,
-                            n_turns=2.5, core_frac=0.08, outer_frac=0.88):
-        """Write a spiral zone-map PNG to *path*.
+                            n_turns=3.0, core_frac=0.11, outer_frac=0.90):
+        """Write a gravity-optimized spiral zone-map PNG to *path*.
 
-        Zones cycle Import→Storage→Export spiralling outward from the centre,
-        creating a black-hole / galaxy-arm effect.  The very centre and outer
-        border remain neutral so robots can navigate around the edge.
+        Flow mirrors gravity pulling packages inward and downward:
 
-        Args:
-            n_turns:    how many full spiral rotations across the radius.
-            core_frac:  fraction of max_r treated as neutral black-hole core.
-            outer_frac: fraction of max_r beyond which cells revert to neutral.
+            Import  — outer ring / top   (packages arrive from outside/above)
+            Storage — middle spiral bands (transit layer)
+            Export  — inner core / bottom (gravity well — packages settle here)
+
+        The spiral rotates clockwise so arms sweep downward.  A vertical
+        gravity bias shifts the zone boundaries progressively toward export
+        at the bottom of the warehouse, reinforcing the gravitational pull.
         """
-        # Build coordinate grids (float)
         ys, xs = np.mgrid[0:gh, 0:gw].astype(float)
         cx, cy = (gw - 1) / 2.0, (gh - 1) / 2.0
         dx, dy = xs - cx, ys - cy
 
-        # Polar coords
         r     = np.sqrt(dx**2 + dy**2)
         theta = np.arctan2(dy, dx)          # -π .. π
 
-        max_r = min(cx, cy)                  # largest usable radius
+        max_r = min(cx, cy)
 
-        # Normalise radius to [0, 1] and theta to [0, 1)
-        r_norm     = r / max_r
-        theta_norm = (theta + np.pi) / (2 * np.pi)   # 0 .. 1
+        r_norm = r / max_r
 
-        # Spiral phase: advances n_turns full cycles as r goes 0→1,
-        # plus one extra cycle contributed by the angle.
-        phase = (r_norm * n_turns + theta_norm) % 3.0
+        # Clockwise angle: negate so arms rotate CW (gravity spiral inward)
+        theta_cw = ((-theta) % (2 * np.pi)) / (2 * np.pi)   # 0 .. 1, clockwise
 
-        # Assign zones based on phase thirds
+        # Vertical gravity bias: 0 at top → gravity_strength at bottom.
+        # Nudges the phase downward so the bottom of the warehouse naturally
+        # settles into the export zone without needing to be near the centre.
+        gravity_strength = 0.85
+        gravity_bias = (ys / (gh - 1)) * gravity_strength
+
+        # Phase encoding (mod 3):
+        #   0 .. 1  → Export  (low phase = inner / bottom = gravity sink)
+        #   1 .. 2  → Storage (mid)
+        #   2 .. 3  → Import  (high phase = outer / top = arrival zone)
+        phase = (r_norm * n_turns + theta_cw + gravity_bias) % 3.0
+
         zone_map = np.zeros((gh, gw), dtype='uint8')
-        zone_map[(phase >= 0) & (phase < 1)] = ZONE_IMPORT
+        zone_map[(phase >= 0) & (phase < 1)] = ZONE_EXPORT
         zone_map[(phase >= 1) & (phase < 2)] = ZONE_STORAGE
-        zone_map[(phase >= 2) & (phase < 3)] = ZONE_EXPORT
+        zone_map[(phase >= 2) & (phase < 3)] = ZONE_IMPORT
 
-        # Hollow out: core (black-hole centre) and outer border → neutral
+        # Hollow core (the singularity) and outer fringe → neutral
         zone_map[r_norm <  core_frac]  = ZONE_NONE
         zone_map[r_norm >= outer_frac] = ZONE_NONE
 
-        # Also clear a 2-cell perimeter so robots can always navigate the edge
+        # Hard 2-cell perimeter so robots can always navigate the edge
         zone_map[:2, :]  = ZONE_NONE
         zone_map[-2:, :] = ZONE_NONE
         zone_map[:, :2]  = ZONE_NONE

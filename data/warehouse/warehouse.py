@@ -482,27 +482,38 @@ class Warehouse:
     def remove_immovables_from_packagesMoveList(self):
         if not self.packagesMoveList:
             return self.packagesMoveList, self.packages, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount
-        # In order of least importance, For packages in PackageMoveList from last pass but still not in PackagesMovingList, (e.g., if they are blocked by space limitation) remove the package from packagesMoveList
-        for packageNumber in reversed(self.packagesMoveList):
+        # For idle packages in the move list that are plan-surplus for their target zone,
+        # cancel only as many as are actually over-planned this tick.
+        #
+        # Surplus = planned_count - free_physical_slots
+        #         = planned_count - (total_slots - actual_in_zone)
+        #
+        # A positive surplus means we have more pending plans than there are empty
+        # slots to absorb them: cancel exactly that many (least-important first,
+        # i.e. reversed move-list order).  Zero or negative surplus = nothing to do,
+        # even if the space-available flag is False — physical slots still exist.
+        # This prevents mass plan-cancellations triggered purely by the boolean gate.
+        free_import  = max(0, self.numberOfImportSlots  - self.packagesInImportCount)
+        free_storage = max(0, self.numberOfStorageSlots - self.packagesInStorageCount)
+        free_export  = max(0, self.numberOfExportSlots  - self.packagesInExportCount)
+        surplus = {
+            'import':  max(0, self.packagesPlannedInImportCount  - free_import),
+            'storage': max(0, self.packagesPlannedInStorageCount - free_storage),
+            'export':  max(0, self.packagesPlannedInExportCount  - free_export),
+        }
+        evicted = {'import': 0, 'storage': 0, 'export': 0}
+        for packageNumber in list(reversed(self.packagesMoveList)):  # snapshot — list is mutated inside loop
             if (packageNumber not in self.packagesMovingList):
                 packageIndex = [y for y, x in enumerate(self.packages) if x.packageNumber == packageNumber]
                 if packageIndex:
                     packageIndex = packageIndex[0]
-                    packageStatus = self.packages[packageIndex].status
-                    packageArea = self.packages[packageIndex].area
+                    packageStatus    = self.packages[packageIndex].status
                     packageAreaTarget = self.packages[packageIndex].areaTarget
-                    packageLocation = self.packages[packageIndex].xyLocation
-                    packageTargetLocation = self.packages[packageIndex].xyLocationTarget
                     removePackage = False
                     if (packageStatus == "idle"):
-                        # Determine If removePackage
                         if (packageAreaTarget == "none"):
                             removePackage = True
-                        elif (packageAreaTarget == "import") and (self.importSpaceAvailable == False):
-                            removePackage = True
-                        elif (packageAreaTarget == "storage") and (self.storageSpaceAvailable == False):
-                            removePackage = True
-                        elif (packageAreaTarget == "export") and (self.exportSpaceAvailable == False):
+                        elif packageAreaTarget in surplus and evicted[packageAreaTarget] < surplus[packageAreaTarget]:
                             removePackage = True
                         # Remove Package
                         if (removePackage == True):
@@ -512,13 +523,30 @@ class Warehouse:
                                 self.packagesPlannedInStorageCount -= 1
                             elif (packageAreaTarget == "export"):
                                 self.packagesPlannedInExportCount -= 1
+                            if packageAreaTarget in evicted:
+                                evicted[packageAreaTarget] += 1
+                            # Clear the phantom target cell so try_packageTargetLocation
+                            # can reuse it this same tick.
+                            tx, ty = self.packages[packageIndex].xyLocationTarget
+                            if self.packageTargetsInWarehouse[ty][tx] == 1:
+                                self.packageTargetsInWarehouse[ty][tx] = 0
                             self.packages[packageIndex].status = "idle"
                             self.packages[packageIndex].areaTarget = "none"
                             self.packagesMoveList.remove(packageNumber)
         return self.packagesMoveList, self.packages, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount
 
     def append_to_packagesMoveList(self):
-        # Drain reorg list first — displaced packages get front-of-queue priority
+        # Headroom = genuinely available destination slots this tick.
+        # Cap new moveList entries to total_headroom so we don't queue more
+        # packages than there are slots to assign targets to this tick.
+        export_headroom  = max(0, self.numberOfExportSlots  - self.packagesInExportCount  - self.packagesPlannedInExportCount)
+        storage_headroom = max(0, self.numberOfStorageSlots - self.packagesInStorageCount - self.packagesPlannedInStorageCount)
+        total_headroom   = export_headroom + storage_headroom
+        new_entries      = 0
+
+        # Drain reorg list first — displaced packages get front-of-queue priority.
+        # Reorg entries reclaim already-planned slot space so they don't consume
+        # from new_entries (which caps against total_headroom for net-new work).
         for pkg_num in list(self.packagesReorgList):
             pkg_idx = next((i for i, p in enumerate(self.packages)
                             if p.packageNumber == pkg_num), None)
@@ -533,6 +561,8 @@ class Warehouse:
         # Add package to packagesMoveList if there is enough bandwidth
         if (len(self.packagesMoveList) < self.packagesMaxMoveQuantity):
             for i in range(len(self.packages)):
+                if new_entries >= total_headroom:
+                    break
                 packageNumber = self.packages[i].packageNumber
                 packageStatus = self.packages[i].status
                 packageArea = self.packages[i].area
@@ -541,14 +571,15 @@ class Warehouse:
                 addPackage = False
                 if (packageStatus == "idle"):
                     if (packageNumber not in self.packagesMoveList) and (packageNumber not in self.packagesMovingList) and (packageArea != "export"):
-                        if ((packageArea == "import") and ((self.storageSpaceAvailable == True) or (self.exportSpaceAvailable == True))):
+                        if (packageArea == "import") and (storage_headroom > 0 or export_headroom > 0):
                             addPackage = True
-                        elif ((packageArea == "storage") and (self.exportSpaceAvailable == True)):
+                        elif (packageArea == "storage") and (export_headroom > 0):
                             addPackage = True
-                        elif ((packageArea == "neutral") and ((self.storageSpaceAvailable == True) or (self.exportSpaceAvailable == True))):
+                        elif (packageArea == "neutral") and (storage_headroom > 0 or export_headroom > 0):
                             addPackage = True
                     if (addPackage == True):
                         self.packagesMoveList.append(packageNumber)
+                        new_entries += 1
                 # Cut packagesMoveList Loop if exceeded packagesMaxMoveQuantity
                 if (len(self.packagesMoveList) >= self.packagesMaxMoveQuantity):
                     break
@@ -557,6 +588,17 @@ class Warehouse:
     def update_packages_targetLocation(self):
         if not self.packagesMoveList:
             return self.packages, self.packageTargetsInWarehouse, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount
+        # Replace the binary spaceAvailable gate with direct headroom counters.
+        #
+        # Headroom = physical free slots - already-planned slots
+        #          = (totalSlots - inZoneCount) - plannedCount
+        #
+        # Each new assignment decrements the headroom, so the number of new
+        # plans made this tick is exactly bounded by the true current capacity.
+        # This eliminates the binary-flag "wave" where all idle packages
+        # simultaneously get (or lose) targets when a gate flag flips.
+        export_headroom  = max(0, self.numberOfExportSlots  - self.packagesInExportCount  - self.packagesPlannedInExportCount)
+        storage_headroom = max(0, self.numberOfStorageSlots - self.packagesInStorageCount - self.packagesPlannedInStorageCount)
         for i in range(len(self.packages)):
             packageNumber = self.packages[i].packageNumber
             packageStatus = self.packages[i].status
@@ -567,24 +609,38 @@ class Warehouse:
                 if (packageStatus == 'idle'):
                     movePackage = False
                     # Try to store package in Export
-                    if (movePackage == False) and (self.exportSpaceAvailable == True):
+                    if (movePackage == False) and (export_headroom > 0):
                         if (packageArea != 'export') and (packageAreaTarget != 'export'):
                             movePackage, xyLocation = Package_Functions.try_packageTargetLocation(self.zoneMap, ZONE_EXPORT, self.packagesInWarehouse, self.packageTargetsInWarehouse, self.chargersInWarehouse)
                             if (movePackage == True):
                                 self.packages[i].areaTarget = 'export'
                                 self.packagesPlannedInExportCount += 1
+                                export_headroom -= 1
                     # Try to store package in Storage
-                    if (movePackage == False) and (self.storageSpaceAvailable == True):
+                    if (movePackage == False) and (storage_headroom > 0):
                         if (packageArea != "storage") and (packageAreaTarget != 'storage'):
                             movePackage, xyLocation = Package_Functions.try_packageTargetLocation(self.zoneMap, ZONE_STORAGE, self.packagesInWarehouse, self.packageTargetsInWarehouse, self.chargersInWarehouse)
                             if (movePackage == True):
                                 self.packages[i].areaTarget = 'storage'
                                 self.packagesPlannedInStorageCount += 1
+                                storage_headroom -= 1
                     # Move the package (or take no action)
                     if (movePackage == True):
                         self.packages[i].xyLocationTarget = xyLocation.copy()
                         self.packages[i].status = 'move planned'
                         self.packageTargetsInWarehouse[xyLocation[1]][xyLocation[0]] = 1
+        # Sweep: remove moveList entries that couldn't get a target this tick.
+        # Headroom counters can slightly overestimate when chargers or in-transit
+        # packages physically block zone cells without being reflected in the
+        # zone-level counts.  Without this sweep those stranded entries (idle,
+        # areaTarget still "none") would appear as a one-frame green flash before
+        # remove_immovables cleans them next tick.
+        for pkgNum in list(self.packagesMoveList):
+            if pkgNum in self.packagesMovingList:
+                continue
+            idx = next((i for i, p in enumerate(self.packages) if p.packageNumber == pkgNum), None)
+            if idx is not None and self.packages[idx].status == 'idle' and self.packages[idx].areaTarget == 'none':
+                self.packagesMoveList.remove(pkgNum)
         return self.packages, self.packageTargetsInWarehouse, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount
 
     def update_packageTargetsInWarehouse(self):
