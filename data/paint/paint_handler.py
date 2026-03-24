@@ -84,6 +84,7 @@ class PaintHandler:
         elif key == ord('l'):
             from data.paint.map_importer import MapImporter
             gw, gh = self.warehouse_res
+            # Zone map
             new_map = MapImporter.load("resources/zone_map.png", gw, gh)
             if new_map is not None:
                 self.warehouse.zoneMap = new_map
@@ -93,6 +94,18 @@ class PaintHandler:
                     (x, y) for y in range(gh) for x in range(gw)
                 }
                 print("[PaintHandler] Zone map hot-reloaded from 'resources/zone_map.png'.")
+            # Charger spawn map
+            _charger_coords = MapImporter.load_spawn_map("resources/charger_map.png", gw, gh)
+            if _charger_coords:
+                self.warehouse.chargerSpawnMap = _charger_coords
+                print("[PaintHandler] Charger spawn map hot-reloaded ({} cells).".format(
+                    len(_charger_coords)))
+            # Robot spawn map
+            _robot_coords = MapImporter.load_spawn_map("resources/robot_map.png", gw, gh)
+            if _robot_coords:
+                self.warehouse.robotSpawnMap = _robot_coords
+                print("[PaintHandler] Robot spawn map hot-reloaded ({} cells).".format(
+                    len(_robot_coords)))
             return True
         return False
 

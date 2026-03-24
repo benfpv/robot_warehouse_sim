@@ -65,6 +65,32 @@ class MainGame:
                 self.warehouse.update_zone_counts()
                 print("[main] Zone map applied from '{}'.".format(_map_path))
 
+        # Charger spawn map: generate example on first run; auto-load charger_map.png if present
+        _charger_example_path = "resources/charger_map_example.png"
+        if not os.path.exists(_charger_example_path):
+            MapImporter.generate_charger_map_example(_charger_example_path, *self.warehouse_res)
+        _charger_map_path = "resources/charger_map.png"
+        if os.path.exists(_charger_map_path):
+            gw, gh = self.warehouse_res
+            _charger_coords = MapImporter.load_spawn_map(_charger_map_path, gw, gh)
+            if _charger_coords:                          # non-empty list = valid map
+                self.warehouse.chargerSpawnMap = _charger_coords
+                print("[main] Charger spawn map applied from '{}' ({} cells).".format(
+                    _charger_map_path, len(_charger_coords)))
+
+        # Robot spawn map: generate example on first run; auto-load robot_map.png if present
+        _robot_example_path = "resources/robot_map_example.png"
+        if not os.path.exists(_robot_example_path):
+            MapImporter.generate_robot_map_example(_robot_example_path, *self.warehouse_res)
+        _robot_map_path = "resources/robot_map.png"
+        if os.path.exists(_robot_map_path):
+            gw, gh = self.warehouse_res
+            _robot_coords = MapImporter.load_spawn_map(_robot_map_path, gw, gh)
+            if _robot_coords:
+                self.warehouse.robotSpawnMap = _robot_coords
+                print("[main] Robot spawn map applied from '{}' ({} cells).".format(
+                    _robot_map_path, len(_robot_coords)))
+
         # Temporary draw
         self.warehouseWindow = self.warehouse_windowArray.copy()
 

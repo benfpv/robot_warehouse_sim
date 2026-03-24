@@ -46,7 +46,9 @@ class Warehouse:
                     numRobotsIdle = 0, numRobotsMoving = 0, numRobotsCharging = 0,
                     # Charging station(s)
                     chargersActionsList = ["none", "idle", "charging planned", "charging"], 
-                    chargers = [], chargersMaxQuantity = 10, chargersInWarehouse = [], chargersRollingCount = 0
+                    chargers = [], chargersMaxQuantity = 10, chargersInWarehouse = [], chargersRollingCount = 0,
+                    # Spawn maps (list of [x,y] coords; None = use default perimeter)
+                    chargerSpawnMap = None, robotSpawnMap = None
                 ) -> None:
         print("--- Warehouse Init ---")
         # Window Resolution, Window Center
@@ -118,6 +120,9 @@ class Warehouse:
         self.chargersMaxQuantity = chargersMaxQuantity
         self.chargersInWarehouse = chargersInWarehouse
         self.chargersRollingCount = chargersRollingCount
+        # Spawn maps (None = use default perimeter coords, set after perimeter init)
+        self._chargerSpawnMap_override = chargerSpawnMap
+        self._robotSpawnMap_override   = robotSpawnMap
         
         # Init Warehouse Screen
         self.windowCenter = Functions.get_screencenter(self.windowRes)
@@ -129,6 +134,13 @@ class Warehouse:
         self.numberOfStorageSlots = int(np.count_nonzero(self.zoneMap == ZONE_STORAGE))
         self.numberOfExportSlots  = int(np.count_nonzero(self.zoneMap == ZONE_EXPORT))
         self.packagesMaxQuantity  = self.numberOfImportSlots + self.numberOfStorageSlots + self.numberOfExportSlots
+        # Resolve spawn maps: use override if provided, else default to computed perimeter coords
+        self.chargerSpawnMap = (self._chargerSpawnMap_override
+                                if self._chargerSpawnMap_override is not None
+                                else self.warehousePerimeterCoordinatesMinusOne)
+        self.robotSpawnMap   = (self._robotSpawnMap_override
+                                if self._robotSpawnMap_override is not None
+                                else self.warehousePerimeterCoordinates)
         self.warehouse_data = Warehouse_Data(self.dataMaxLength)
     
     def update_warehouse(self):
@@ -763,7 +775,7 @@ class Warehouse:
     # Update Robots
     def update_robots(self):
         # Import Robot
-        self.robotsRollingCount, self.robotsInWarehouseCount, self.robots, self.robotsTaskAssignmentList = Robot_Functions.import_robot(Robot_Functions, self.warehousePerimeterCoordinates, self.robotsRollingCount, self.robotsInWarehouseCount, self.robotsMaxQuantity, self.robotsInWarehouse, self.robots, self.robotsTaskAssignmentList, self.chargersInWarehouse) # Import Robot
+        self.robotsRollingCount, self.robotsInWarehouseCount, self.robots, self.robotsTaskAssignmentList = Robot_Functions.import_robot(Robot_Functions, self.robotSpawnMap, self.robotsRollingCount, self.robotsInWarehouseCount, self.robotsMaxQuantity, self.robotsInWarehouse, self.robots, self.robotsTaskAssignmentList, self.chargersInWarehouse) # Import Robot
         # Update self-checks
         self.robots = self.update_robots_batteryPercent() # Deplete batteryPercent
         self.robots, self.robotsTaskAssignmentList, self.robotsLog, self.chargers, self.packagesMoveList = self.update_robots_checkBattery() # Self-check batteryPercent
@@ -790,7 +802,7 @@ class Warehouse:
 
     def update_chargers(self):
         # Import Charger
-        self.chargersRollingCount, self.chargers = Charger_Functions.import_charger(Charger_Functions, self.warehousePerimeterCoordinatesMinusOne, self.chargersRollingCount, self.chargersMaxQuantity, self.chargersInWarehouse, self.chargers, self.packagesInWarehouse)
+        self.chargersRollingCount, self.chargers = Charger_Functions.import_charger(Charger_Functions, self.chargerSpawnMap, self.chargersRollingCount, self.chargersMaxQuantity, self.chargersInWarehouse, self.chargers, self.packagesInWarehouse)
         return self.chargers, self.chargersRollingCount, self.chargersInWarehouse
 
     def update_robots_batteryPercent(self):

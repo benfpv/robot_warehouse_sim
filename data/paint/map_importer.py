@@ -484,3 +484,213 @@ class MapImporter:
         cw2, ch2 = gw * cell_px, gh * cell_px
         print("[MapImporter] Spiral map written: {}  ({}×{} px), slots: {}".format(
             path, cw2, ch2, counts))
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Spawn-position maps (charger / robot)
+    # ─────────────────────────────────────────────────────────────────────
+    #
+    # These maps define WHERE chargers/robots are allowed to spawn.
+    # Any painted pixel = valid spawn cell; unpainted = forbidden.
+    #
+    # Colour conventions (load_spawn_map accepts any saturated pixel):
+    #   Charger map  →  YELLOW   (BGR: 0, 220, 220)   key colour family: yellow
+    #   Robot   map  →  CYAN     (BGR: 220, 220, 0)    key colour family: cyan / teal
+    #   Neutral / forbidden  →  black / grey / white
+    #
+    # Both maps are optional.  If a file is absent the sim falls back to
+    # the default perimeter coordinate list computed from the grid boundary.
+
+    # HSV saturation/value floors (same as zone map)
+    _SPAWN_S_MIN = 60
+    _SPAWN_V_MIN = 40
+
+    @classmethod
+    def load_spawn_map(cls, path, gw, gh):
+        """Load a spawn-map PNG and return a list of [x, y] valid-spawn coordinates.
+
+        Any pixel that is *not* near-black/grey/white (i.e. has enough colour)
+        is treated as a valid spawn cell, regardless of the exact hue.  This is
+        simpler than zone maps because there is only one "on" state.
+
+        Returns a list of [x, y] pairs (may be empty), or None if the file
+        could not be read.  An empty list means the map was read successfully
+        but had no painted cells — the caller should then fall back to default
+        perimeter coords.
+        """
+        img = cv2.imread(path)
+        if img is None:
+            print("[MapImporter] Could not read spawn map: {}".format(path))
+            return None
+
+        img = cv2.resize(img, (gw, gh), interpolation=cv2.INTER_NEAREST)
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        S = hsv[:, :, 1]
+        V = hsv[:, :, 2]
+
+        valid_mask = (S >= cls._SPAWN_S_MIN) & (V >= cls._SPAWN_V_MIN)
+        ys, xs = np.where(valid_mask)
+        coords = [[int(x), int(y)] for x, y in zip(xs, ys)]
+
+        print("[MapImporter] Spawn map '{}' → {} valid cells".format(path, len(coords)))
+        return coords
+
+    @classmethod
+    def generate_charger_map_example(cls, path, gw=80, gh=70, cell_px=8):
+        """Write an annotated example charger-spawn-map PNG to *path*.
+
+        The default pattern places chargers on the inner perimeter (1 cell in
+        from the edge), which mirrors the default perimeter-minus-one logic.
+        Paint yellow over any cells where chargers should be allowed to spawn.
+        """
+        canvas_w, canvas_h = gw * cell_px, gh * cell_px
+        legend_h = 60
+        img = np.full((canvas_h + legend_h, canvas_w, 3), 18, dtype=np.uint8)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+
+        # Default inner-perimeter band (1 cell inset from all four edges)
+        # Mirrors Warehouse_Init.init_warehousePerimeter(..., inset=1)
+        yellow_bgr = (0, 220, 220)    # BGR: yellow
+        for x in range(1, gw - 1):
+            for y in [1, gh - 2]:
+                px0, px1 = x * cell_px, (x + 1) * cell_px
+                py0, py1 = y * cell_px, (y + 1) * cell_px
+                img[py0:py1, px0:px1] = yellow_bgr
+        for y in range(1, gh - 1):
+            for x in [1, gw - 2]:
+                px0, px1 = x * cell_px, (x + 1) * cell_px
+                py0, py1 = y * cell_px, (y + 1) * cell_px
+                img[py0:py1, px0:px1] = yellow_bgr
+
+        # Grid guide lines
+        lc = (38, 38, 38)
+        for i in range(0, gw + 1, 10):
+            cv2.line(img, (i * cell_px, 0), (i * cell_px, canvas_h - 1), lc, 1)
+        for i in range(0, gh + 1, 10):
+            cv2.line(img, (0, i * cell_px), (canvas_w - 1, i * cell_px), lc, 1)
+
+        # Title
+        cv2.putText(img, "CHARGER SPAWN MAP  — paint YELLOW where chargers may spawn",
+                    (6, 14), font, 0.28, (80, 80, 80), 1)
+
+        # Legend strip
+        img[canvas_h:canvas_h + 1, :] = 50
+        cv2.rectangle(img, (8, canvas_h + 12), (8 + 60, canvas_h + 32), yellow_bgr, -1)
+        cv2.rectangle(img, (8, canvas_h + 12), (8 + 60, canvas_h + 32), (160, 160, 160), 1)
+        cv2.putText(img, "YELLOW = valid charger spawn cell  (any yellow shade works)",
+                    (80, canvas_h + 26), font, 0.30, (120, 200, 200), 1)
+        cv2.putText(img, "Black / grey / white = forbidden (no charger spawns here)",
+                    (80, canvas_h + 46), font, 0.28, (80, 80, 80), 1)
+        instr = "Save as  resources/charger_map.png  |  press L in sim to hot-reload"
+        (iw, _), _ = cv2.getTextSize(instr, font, 0.25, 1)
+        cv2.putText(img, instr, ((canvas_w - iw) // 2, canvas_h + legend_h - 4),
+                    font, 0.25, (55, 55, 55), 1)
+
+        out_dir = os.path.dirname(os.path.abspath(path))
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        cv2.imwrite(path, img)
+        print("[MapImporter] Charger-map example written: {}".format(path))
+
+    @classmethod
+    def generate_robot_map_example(cls, path, gw=80, gh=70, cell_px=8):
+        """Write an annotated example robot-spawn-map PNG to *path*.
+
+        The default pattern places robots on the outer perimeter (0 cells inset),
+        which mirrors the default perimeter coordinate logic.
+        Paint cyan over any cells where robots should be allowed to spawn.
+        """
+        canvas_w, canvas_h = gw * cell_px, gh * cell_px
+        legend_h = 60
+        img = np.full((canvas_h + legend_h, canvas_w, 3), 18, dtype=np.uint8)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+
+        # Default outer-perimeter band (0 cells inset — the very edge)
+        cyan_bgr = (220, 220, 0)    # BGR: cyan
+        for x in range(gw):
+            for y in [0, gh - 1]:
+                px0, px1 = x * cell_px, (x + 1) * cell_px
+                py0, py1 = y * cell_px, (y + 1) * cell_px
+                img[py0:py1, px0:px1] = cyan_bgr
+        for y in range(gh):
+            for x in [0, gw - 1]:
+                px0, px1 = x * cell_px, (x + 1) * cell_px
+                py0, py1 = y * cell_px, (y + 1) * cell_px
+                img[py0:py1, px0:px1] = cyan_bgr
+
+        # Grid guide lines
+        lc = (38, 38, 38)
+        for i in range(0, gw + 1, 10):
+            cv2.line(img, (i * cell_px, 0), (i * cell_px, canvas_h - 1), lc, 1)
+        for i in range(0, gh + 1, 10):
+            cv2.line(img, (0, i * cell_px), (canvas_w - 1, i * cell_px), lc, 1)
+
+        # Title
+        cv2.putText(img, "ROBOT SPAWN MAP  — paint CYAN where robots may spawn",
+                    (6, 14), font, 0.28, (80, 80, 80), 1)
+
+        # Legend strip
+        img[canvas_h:canvas_h + 1, :] = 50
+        cv2.rectangle(img, (8, canvas_h + 12), (8 + 60, canvas_h + 32), cyan_bgr, -1)
+        cv2.rectangle(img, (8, canvas_h + 12), (8 + 60, canvas_h + 32), (160, 160, 160), 1)
+        cv2.putText(img, "CYAN = valid robot spawn cell  (any cyan/teal shade works)",
+                    (80, canvas_h + 26), font, 0.30, (200, 200, 80), 1)
+        cv2.putText(img, "Black / grey / white = forbidden (no robot spawns here)",
+                    (80, canvas_h + 46), font, 0.28, (80, 80, 80), 1)
+        instr = "Save as  resources/robot_map.png  |  press L in sim to hot-reload"
+        (iw, _), _ = cv2.getTextSize(instr, font, 0.25, 1)
+        cv2.putText(img, instr, ((canvas_w - iw) // 2, canvas_h + legend_h - 4),
+                    font, 0.25, (55, 55, 55), 1)
+
+        out_dir = os.path.dirname(os.path.abspath(path))
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        cv2.imwrite(path, img)
+        print("[MapImporter] Robot-map example written: {}".format(path))
+
+    @classmethod
+    def generate_charger_map(cls, path, gw=80, gh=70, cell_px=8):
+        """Write a clean charger-spawn-map PNG (inner perimeter, yellow, no annotations).
+
+        Mirrors the default warehousePerimeterCoordinatesMinusOne — one cell inset
+        from all four edges.  Save to resources/charger_map.png and it will be
+        auto-loaded on startup (or press L in-sim to hot-reload).
+        """
+        yellow_bgr = (0, 220, 220)
+        img = np.zeros((gh * cell_px, gw * cell_px, 3), dtype=np.uint8)
+        # Inner perimeter: x in [1..gw-2] at y=1 and y=gh-2;
+        #                  y in [1..gh-2] at x=1 and x=gw-2
+        for x in range(1, gw - 1):
+            for y in [1, gh - 2]:
+                img[y * cell_px:(y + 1) * cell_px, x * cell_px:(x + 1) * cell_px] = yellow_bgr
+        for y in range(1, gh - 1):
+            for x in [1, gw - 2]:
+                img[y * cell_px:(y + 1) * cell_px, x * cell_px:(x + 1) * cell_px] = yellow_bgr
+        out_dir = os.path.dirname(os.path.abspath(path))
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        cv2.imwrite(path, img)
+        print("[MapImporter] Charger map written: {}".format(path))
+
+    @classmethod
+    def generate_robot_map(cls, path, gw=80, gh=70, cell_px=8):
+        """Write a clean robot-spawn-map PNG (outer perimeter, cyan, no annotations).
+
+        Mirrors the default warehousePerimeterCoordinates — the very edge row/column
+        on all four sides.  Save to resources/robot_map.png and it will be
+        auto-loaded on startup (or press L in-sim to hot-reload).
+        """
+        cyan_bgr = (220, 220, 0)
+        img = np.zeros((gh * cell_px, gw * cell_px, 3), dtype=np.uint8)
+        # Outer perimeter: x in [0..gw-1] at y=0 and y=gh-1;
+        #                  y in [0..gh-1] at x=0 and x=gw-1
+        for x in range(gw):
+            for y in [0, gh - 1]:
+                img[y * cell_px:(y + 1) * cell_px, x * cell_px:(x + 1) * cell_px] = cyan_bgr
+        for y in range(gh):
+            for x in [0, gw - 1]:
+                img[y * cell_px:(y + 1) * cell_px, x * cell_px:(x + 1) * cell_px] = cyan_bgr
+        out_dir = os.path.dirname(os.path.abspath(path))
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        cv2.imwrite(path, img)
+        print("[MapImporter] Robot map written: {}".format(path))
