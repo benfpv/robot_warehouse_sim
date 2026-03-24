@@ -17,6 +17,8 @@ from data.draw.draw_warehouse import *
 from data.display.display_functions import *
 from data.paint.paint_handler import PaintHandler
 from data.paint.map_importer import MapImporter
+from data.paint.warehouse_optimizer import WarehouseOptimizer
+from data.paint.zone_strategy import ZoneStrategy
 
 class MainGame:
     def __init__(self):
@@ -41,6 +43,10 @@ class MainGame:
         # Init Warehouse
         self.warehouse = Warehouse(self.warehouse_res, self.warehouse_windowBackgroundColour, self.warehouse_windowCenter, self.warehouse_windowArray, self.itemsList, self.addressesList)
 
+        # Optimizer (strategy pattern — zone rebalancing first, future: charger/robot)
+        self.optimizer = WarehouseOptimizer(tick_rate=int(1 / self.sim_frametime))
+        self.optimizer.register(ZoneStrategy(self.warehouse_res))
+
         # Zone painting — targeting the zone-map sub-view (top-right panel)
         # zone-map panel rect in composite: x = mw + sw*2, y = 0, w = sw, h = sh
         _zone_view_rect = (
@@ -49,7 +55,7 @@ class MainGame:
             self.sub_windowRes[0],                                      # pw
             self.sub_windowRes[1],                                      # ph
         )
-        self.paint_handler = PaintHandler(self.warehouse, self.warehouse_res, _zone_view_rect)
+        self.paint_handler = PaintHandler(self.warehouse, self.warehouse_res, _zone_view_rect, self.optimizer)
         cv2.setMouseCallback("warehouse", self.paint_handler.on_mouse)
 
         # Map importer: generate example on first run; auto-load zone_map.png if present
@@ -201,6 +207,7 @@ class MainGame:
             return self
 
         # Update Existing
+        self.optimizer.step(self.warehouse)
         self.warehouse = self.warehouse.update_warehouse()
 
         # Draw (rate-limited independently of sim)
