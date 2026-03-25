@@ -30,7 +30,7 @@ class MainGame:
         self.warehouse_windowBackgroundColour = [50,50,50]
         self.warehouse_windowRes = (320, 280) # upsized resolution (width, height)
         self.sim_frametime  = 1 / 40   # 40 sim ticks/sec
-        self.draw_frametime = 1 / 20   # 20 display fps
+        self.draw_frametime = 1 / 15   # 15 display fps (reduced to save power)
         self._last_draw_time = 0.0
         self.frametime_cap = self.sim_frametime  # kept for hist_sample_every
         # Init Windows
@@ -105,8 +105,8 @@ class MainGame:
         self.warehouse_windowArray = Functions.get_screenarray_colour(self.warehouse_res, self.warehouse_windowBackgroundColour)
         self.sub_windowRes = (int(self.warehouse_windowRes[0] * 0.5), int(self.warehouse_windowRes[1] * 0.5))  # 160x140
         self.panel_h = 165
-        self.chart_h = 130
-        self.composite_windowRes = (self.warehouse_windowRes[0] + self.sub_windowRes[0] * 3, self.warehouse_windowRes[1] + self.panel_h + self.chart_h)  # 800x575
+        self.chart_h = 95
+        self.composite_windowRes = (self.warehouse_windowRes[0] + self.sub_windowRes[0] * 4, self.warehouse_windowRes[1] + self.panel_h + self.chart_h)  # 960x540
         # Rolling history arrays for charts (1800 samples @ 1/sec ≈ 30 min)
         _H = 1800
         self._hist_imported = np.zeros(_H, dtype=np.float32)
@@ -125,6 +125,9 @@ class MainGame:
         # Rate-of-change tracking (snapshot every 1s sample)
         self._prev_stats = None   # dict of key→value at last sample
         self._rate_stats = {}     # dict of key→delta/sec
+        # Robot traffic heatmap — accumulated robotsInWarehouse, decayed each tick
+        gw, gh = self.warehouse_res
+        self._robot_heatmap = np.zeros((gh, gw), dtype=np.float32)
         screen_w, screen_h = Display_Functions.get_screen_resolution()
         cx = (screen_w - self.composite_windowRes[0]) // 2
         cy = (screen_h - self.composite_windowRes[1]) // 2
@@ -209,6 +212,13 @@ class MainGame:
         # Update Existing
         self.optimizer.step(self.warehouse)
         self.warehouse = self.warehouse.update_warehouse()
+        # Accumulate robot traffic heatmap — only moving robots, not idle/charging
+        _STATIC = {'idle', 'charging'}
+        self._robot_heatmap *= 0.9994
+        for _rb in self.warehouse.robots:
+            if _rb.status not in _STATIC:
+                _rx, _ry = _rb.xyLocation
+                self._robot_heatmap[_ry, _rx] += 1.0
 
         # Draw (rate-limited independently of sim)
         now = time.time()
@@ -239,8 +249,8 @@ class MainGame:
         mw, mh = self.warehouse_windowRes   # 320, 280
         sw, sh = self.sub_windowRes         # 160, 140
         ph = self.panel_h                   # 165
-        ch = self.chart_h                   # 130
-        cw = mw + sw * 3                    # 800
+        ch = self.chart_h                   # 95
+        cw = mw + sw * 4                    # 960
         zone_colours = {1: self.warehouse.colourOfImportAreas, 2: self.warehouse.colourOfStorageAreas, 3: self.warehouse.colourOfExportAreas}
         composite = np.zeros((mh + ph + ch, cw, 3), dtype=np.uint8)
 
@@ -252,9 +262,19 @@ class MainGame:
             img = cv2.resize((arr * 255).astype(np.uint8), (sw, sh), interpolation=cv2.INTER_NEAREST)
             composite[row*sh:(row+1)*sh, mw+col*sw:mw+(col+1)*sw] = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
-        place_binary(self.warehouse.chargersInWarehouse,       0, 0)
+        place_binary(self.warehouse.chargersInWarehouse,        0, 0)
         place_binary(self.warehouse.packagesInWarehouse,        0, 1)
         place_binary(self.warehouse.robotsInWarehouse,          1, 0)
+        # Traffic heatmap — row 0, col 3 (dedicated panel, full sw×sh)
+        _hm_max = self._robot_heatmap.max()
+        if _hm_max > 0:
+            _hm_norm = np.clip(self._robot_heatmap / _hm_max * 255, 0, 255).astype(np.uint8)
+        else:
+            _hm_norm = np.zeros_like(self._robot_heatmap, dtype=np.uint8)
+        _hm_col = cv2.applyColorMap(
+            cv2.resize(_hm_norm, (sw, sh), interpolation=cv2.INTER_NEAREST),
+            cv2.COLORMAP_HOT)
+        composite[sh:2*sh, mw+sw*2:mw+sw*3] = _hm_col
         # Package targets sub-view: arrows on blank canvas, target dots stamped on top
         sub_scale = sw // self.warehouse_res[0]  # 2
         pkg_tgt_img = np.zeros((sh, sw, 3), dtype=np.uint8)
@@ -269,19 +289,71 @@ class MainGame:
         _brush_w = self.paint_handler.BRUSH_W
         _map_w   = sw - _brush_w
         _map_h   = sh - _btn_h
-        zoneMap_display = Draw_Warehouse.draw_zoneMap_display(self.warehouse.zoneMap, zone_colours)
+        # Brighten zone colours for the sub-view (main view uses very dark colours
+        # so packages/robots are visible on top; the zone map has no entities so
+        # can afford much higher contrast against the dark background).
+        _zm_cols = {k: tuple(min(int(c * 5), 160) for c in v) for k, v in zone_colours.items()}
+        zoneMap_display = Draw_Warehouse.draw_zoneMap_display(self.warehouse.zoneMap, _zm_cols)
         composite[0:_map_h, mw+sw*2:mw+sw*2+_map_w] = cv2.resize(zoneMap_display, (_map_w, _map_h), interpolation=cv2.INTER_NEAREST)
+
+        # Zone utilization % legend on ZONE MAP — fixed stacked column, bottom-left of map area
+        _zs = next((s for s in self.optimizer.strategies if s.name == 'Zone'), None)
+        _util_overlay_active = _zs and _zs._total >= _zs.WARMUP_TICKS
+        if _util_overlay_active:
+            _ufont = cv2.FONT_HERSHEY_SIMPLEX
+            _ufs   = 0.28
+            _ulent = [
+                (1, 'IMP', self.warehouse.colourOfImportAreas),
+                (2, 'STO', self.warehouse.colourOfStorageAreas),
+                (3, 'EXP', self.warehouse.colourOfExportAreas),
+            ]
+            # Measure max line width for background rect
+            _u_lh = 11
+            _u_pad = 3
+            _u_lines = []
+            for _zid_u, _abbr_u, _zcol_u in _ulent:
+                _upct = int(_zs._util_ema[_zid_u] * 100)
+                _u_lines.append((_abbr_u, _upct, _zcol_u, _zs._util_ema[_zid_u]))
+            _u_max_w = max(
+                cv2.getTextSize('{} {}%'.format(a, p), _ufont, _ufs, 1)[0][0]
+                for a, p, _, __ in _u_lines
+            )
+            _zmap_x0 = mw + sw * 2
+            _u_x0 = _zmap_x0 + _u_pad
+            _u_y0 = _map_h - len(_u_lines) * _u_lh - _u_pad
+            # Semi-transparent dark background
+            _ubg_x1 = _u_x0 + _u_max_w + _u_pad * 2 + 6
+            _ubg_y1 = _map_h
+            _u_roi = composite[_u_y0:_ubg_y1, _u_x0 - _u_pad:_ubg_x1]
+            composite[_u_y0:_ubg_y1, _u_x0 - _u_pad:_ubg_x1] = (_u_roi * 0.3).astype(np.uint8)
+            for _i, (_abbr_u, _upct, _zcol_u, _uval) in enumerate(_u_lines):
+                _uy = _u_y0 + (_i + 1) * _u_lh - 1
+                # Colour swatch
+                _bright_u = tuple(min(int(c * 2.2), 255) for c in _zcol_u)
+                cv2.rectangle(composite, (_u_x0, _uy - 7), (_u_x0 + 4, _uy - 2), _bright_u, -1)
+                # Value colour by threshold
+                if _uval > _zs.HIGH_THRESH:
+                    _ucol = (60, 60, 220)    # red — bottleneck
+                elif _uval < _zs.LOW_THRESH:
+                    _ucol = (50, 200, 220)   # yellow — under-used
+                else:
+                    _ucol = (170, 170, 170)  # neutral grey
+                cv2.putText(composite, '{} {}%'.format(_abbr_u, _upct),
+                            (_u_x0 + 7, _uy), _ufont, _ufs, _ucol, 1)
 
         # Sub-view title overlays (drawn onto composite after all sub-views are placed)
         _tfont = cv2.FONT_HERSHEY_SIMPLEX
         _tcol  = (110, 110, 110)
+        _zonemap_title = "ZONE MAP util%" if _util_overlay_active else "ZONE MAP"
         _titles = [
-            ("WAREHOUSE",   4,        4),
-            ("CHARGERS",    mw + 4,   4),
-            ("PACKAGES",    mw+sw+4,  4),
-            ("ROBOTS",      mw + 4,   sh + 4),
-            ("PKG TARGETS", mw+sw+4,  sh + 4),
-            ("ZONE MAP",    mw+sw*2+4, 4),
+            ("WAREHOUSE",    4,            4),
+            ("CHARGERS",     mw + 4,       4),
+            ("PACKAGES",     mw+sw+4,      4),
+            ("ROBOTS",       mw + 4,       sh + 4),
+            ("PKG TARGETS",  mw+sw+4,      sh + 4),
+            ("TRAFFIC",      mw+sw*2+4,    sh + 4),
+            (_zonemap_title, mw+sw*2+4,    4),
+            ("SIM STATS",    mw+sw*3+4,    4),
         ]
         for _ttxt, _tx, _ty in _titles:
             cv2.putText(composite, _ttxt, (_tx, _ty + 8), _tfont, 0.28, _tcol, 1)
@@ -334,22 +406,50 @@ class MainGame:
             v = r.get(key, 0)
             return self._fmt_rate(v)
 
+        # Fleet summary
+        _idle_r = sum(1 for rb in wh.robots if rb.status == 'idle')
+        _avg_b  = int(sum(rb.batteryPercent for rb in wh.robots) / max(len(wh.robots), 1))
+        # Optimizer / zone utilization state (reuse cached _zs from overlay block)
+        if _zs and _zs._total >= _zs.WARMUP_TICKS:
+            _util_str = "I:{} S:{} E:{}".format(
+                int(_zs._util_ema[1] * 100),
+                int(_zs._util_ema[2] * 100),
+                int(_zs._util_ema[3] * 100))
+            if _zs._last_action_str:
+                _opt_age = now_t - _zs._last_action_time
+                _opt_str = "{} {:.0f}s".format(_zs._last_action_str, _opt_age)
+            else:
+                _opt_str = "no change yet"
+        elif _zs:
+            _rem = max(0, _zs.WARMUP_TICKS - _zs._total)
+            _util_str = "warmup {}t".format(_rem)
+            _opt_str  = "off" if not _zs.enabled else "waiting"
+        else:
+            _util_str = "---"
+            _opt_str  = "---"
+
+        # Determine colour for optimizer lines based on state
+        _opt_active  = _zs and _zs.enabled and _zs._total >= _zs.WARMUP_TICKS
+        _util_col    = (80, 210, 180) if _opt_active else (90, 90, 90)   # teal / dim
+        _opt_col     = (80, 210, 180) if (_opt_active and _zs._last_action_str) else (90, 90, 90)
+
+        # (label, value, optional custom colour)
         stats_lines = [
-            ("elapsed",  self._fmt_elapsed(self.timeElapsed)),
-            ("loops",    "{} ({})".format(_n(wh.warehouseLoopCount),    _r("loops"))),
-            ("exported", "{} ({})".format(_n(wh.packageExportRollingCount), _r("export"))),
-            ("pkgs",     "{}/{} ({})".format(_n(wh.packagesInWarehouseCount), _n(wh.packagesMaxQuantity), _r("pkgs"))),
-            ("robots",   "{}".format(len(wh.robots))),
-            ("chargers", "{}".format(len(wh.chargers))),
-            ("import",   "{}/{} ({})".format(_n(wh.packagesInImportCount),  _n(wh.numberOfImportSlots),  _r("import"))),
-            ("storage",  "{}/{} ({})".format(_n(wh.packagesInStorageCount), _n(wh.numberOfStorageSlots), _r("storage"))),
-            ("export",   "{}/{} ({})".format(_n(wh.packagesInExportCount),  _n(wh.numberOfExportSlots),  _r("expzone"))),
-            ("newest",   young_pkg),
-            ("oldest",   old_pkg),
+            ("elapsed",  self._fmt_elapsed(self.timeElapsed), None),
+            ("loops",    "{} ({})".format(_n(wh.warehouseLoopCount),    _r("loops")), None),
+            ("exported", "{} ({})".format(_n(wh.packageExportRollingCount), _r("export")), None),
+            ("pkgs",     "{}/{} ({})".format(_n(wh.packagesInWarehouseCount), _n(wh.packagesMaxQuantity), _r("pkgs")), None),
+            ("robots",   "idle:{}/{} b:{}%".format(_idle_r, len(wh.robots), _avg_b), None),
+            ("util",     _util_str, _util_col),
+            ("opt",      _opt_str,  _opt_col),
+            ("import",   "{}/{} ({})".format(_n(wh.packagesInImportCount),  _n(wh.numberOfImportSlots),  _r("import")), None),
+            ("storage",  "{}/{} ({})".format(_n(wh.packagesInStorageCount), _n(wh.numberOfStorageSlots), _r("storage")), None),
+            ("export",   "{}/{} ({})".format(_n(wh.packagesInExportCount),  _n(wh.numberOfExportSlots),  _r("expzone")), None),
+            ("newest",   young_pkg, None),
         ]
         lbl_x = 4
         val_x = 48
-        for si, (lbl, val) in enumerate(stats_lines):
+        for si, (lbl, val, vcol) in enumerate(stats_lines):
             sy2 = 22 + si * 11
             if sy2 > sh - 4:
                 break
@@ -371,8 +471,8 @@ class MainGame:
                     if _fits(val + "\u2026"):
                         val = val + "\u2026"
                         break
-            cv2.putText(stats_img, val, (val_x, sy2), sfont, sfs, swhite, 1)
-        composite[sh:2*sh, mw+sw*2:mw+sw*3] = stats_img
+            cv2.putText(stats_img, val, (val_x, sy2), sfont, sfs, vcol or swhite, 1)
+        composite[0:sh, mw+sw*3:mw+sw*4] = stats_img
 
         # Info panel
         composite[mh, :] = 60  # thin separator line
@@ -575,7 +675,9 @@ class MainGame:
         _outline(mw,         sh,  mw + sw,     sh * 2)       # robots binary
         _outline(mw + sw,    sh,  mw + sw * 2, sh * 2)       # package targets
         _outline(mw + sw*2,  0,   mw + sw * 3, sh)           # zone map
-        _outline(mw + sw*2,  sh,  mw + sw * 3, sh * 2)       # sim stats
+        _outline(mw + sw*2,  sh,  mw + sw * 3, sh * 2)       # traffic heatmap
+        _outline(mw + sw*3,  0,   mw + sw * 4, sh)            # sim stats
+        _outline(mw + sw*3,  sh,  mw + sw * 4, sh * 2)        # (reserved)
         # Info panel (one outline for the whole strip)
         _outline(0,           mh,       cw,           mh + ph)      # info panel
         # Chart strip (three charts)
@@ -704,8 +806,8 @@ class MainGame:
         ]
         lbl_w     = 56                         # wide enough for "Storage" at fs=0.3
         bar_max_w = w - lbl_w - 56 - 4          # 266-56-56-4=150; leaves 56px right margin
-        bar_h     = 18
-        bar_slot  = 37                           # bar_h + gap; 3 slots = 111px, fits in 129px with header
+        bar_h     = 14
+        bar_slot  = 26                           # bar_h + gap; 3 slots = 78px, fits in 94px with header
         for i, (name, used, total, col) in enumerate(zones):
             by   = 15 + i * bar_slot
             frac = min(used / max(total, 1), 1.0)

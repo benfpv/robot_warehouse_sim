@@ -7,6 +7,7 @@ incrementally grows/shrinks zone boundaries at their frontiers.
 Mutations go through ``wh.pending_zone_changes`` so the existing
 ``reconcile_zone_changes()`` pipeline handles in-flight package safety.
 """
+import time
 import numpy as np
 
 # Zone constants (must match warehouse.py / paint_handler.py)
@@ -18,6 +19,9 @@ ZONE_EXPORT  = 3
 _ZONE_IDS   = (ZONE_IMPORT, ZONE_STORAGE, ZONE_EXPORT)
 _ZONE_NAMES = {ZONE_NONE: 'neutral', ZONE_IMPORT: 'import',
                ZONE_STORAGE: 'storage', ZONE_EXPORT: 'export'}
+# Short abbreviations used in the UI stats line where space is tight
+_ZONE_ABBR  = {ZONE_NONE: 'clr', ZONE_IMPORT: 'imp',
+               ZONE_STORAGE: 'sto', ZONE_EXPORT: 'exp'}
 
 # 4-connected neighbor offsets
 _NEIGHBORS = [(-1, 0), (1, 0), (0, -1), (0, 1)]
@@ -39,33 +43,35 @@ class ZoneStrategy:
     label = 'Z'
 
     # ── Tuning constants ──────────────────────────────────────────────
-    EVAL_INTERVAL   = 40      # ticks between passes (~1 sec at 40 tps)
+    EVAL_INTERVAL   = 20      # ticks between passes (~0.5 sec at 40 tps)
     WARMUP_TICKS    = 200     # ~5 sec startup grace period
-    EMA_ALPHA       = 0.15    # smoothing factor for utilization EMA
+    EMA_ALPHA       = 0.20    # smoothing factor for utilization EMA
     HIGH_THRESH     = 0.80    # utilization above this = bottleneck
     LOW_THRESH      = 0.40    # utilization below this = donor candidate
     MIN_ZONE_CELLS  = 50      # never shrink a zone below this count
-    COOLDOWN_MULTI  = 3       # cooldown = COOLDOWN_MULTI × EVAL_INTERVAL ticks
+    COOLDOWN_MULTI  = 2       # cooldown = COOLDOWN_MULTI × EVAL_INTERVAL ticks
 
     # Target slot proportions (used as tiebreaker bias, not hard constraint)
     _TARGET_RATIOS  = {ZONE_IMPORT: 0.20, ZONE_STORAGE: 0.45, ZONE_EXPORT: 0.35}
 
     def __init__(self, warehouse_res):
-        self.enabled = False
+        self.enabled = True
         self._gw, self._gh = warehouse_res
         self._tick      = 0       # ticks since last eval
-        self._total     = 0       # total ticks since enable (for warmup)
+        self._total     = 0       # total sim ticks elapsed (warmup; never reset)
         self._util_ema  = {z: 0.0 for z in _ZONE_IDS}
         self._cooldown  = {z: 0   for z in _ZONE_IDS}   # remaining cooldown ticks
         self._zonable   = None    # bool mask (H, W), computed lazily
+        self._last_action_str  = ''   # description of last mutation (for UI)
+        self._last_action_time = 0.0  # wall-clock time of last mutation
 
     # ── Orchestrator interface ─────────────────────────────────────────
 
     def step(self, wh, budget):
         """Called every tick by the orchestrator when enabled."""
+        self._total += 1   # always advance so warmup measures sim age, not enable age
         if not self.enabled:
             return
-        self._total += 1
         self._tick  += 1
         # Decrement cooldowns
         for z in _ZONE_IDS:
@@ -95,23 +101,29 @@ class ZoneStrategy:
         if n_grow or n_shrink:
             parts = []
             if n_grow:
-                parts.append('+{} {}'.format(n_grow, _ZONE_NAMES[grow_zone]))
+                parts.append('+{} {}'.format(n_grow, _ZONE_ABBR[grow_zone]))
             if n_shrink:
-                parts.append('-{} {}'.format(n_shrink, _ZONE_NAMES[shrink_zone]))
-            # Set cooldown on touched zones
-            if grow_zone is not None:
-                self._cooldown[grow_zone] = self.COOLDOWN_MULTI * self.EVAL_INTERVAL
+                parts.append('-{} {}'.format(n_shrink, _ZONE_ABBR[shrink_zone]))
+            # Only cool down the donor (shrunk zone) — not the bottleneck.
+            # The bottleneck must remain free to keep growing every eval until
+            # utilization drops below HIGH_THRESH.
             if shrink_zone is not None and shrink_zone != ZONE_NONE:
                 self._cooldown[shrink_zone] = self.COOLDOWN_MULTI * self.EVAL_INTERVAL
-            print('[ZoneStrategy] {}'.format(', '.join(parts)))
+            self._last_action_str  = ', '.join(parts)
+            self._last_action_time = time.time()
 
     def reset(self, wh):
-        """Reset internal state (called on hot-reload)."""
+        """Reset internal state (called on hot-reload).
+
+        ``_total`` is intentionally preserved so the startup warmup does not
+        re-trigger after a map hot-reload mid-simulation.
+        """
         self._tick     = 0
-        self._total    = 0
         self._util_ema = {z: 0.0 for z in _ZONE_IDS}
         self._cooldown = {z: 0   for z in _ZONE_IDS}
         self._zonable  = None     # recomputed lazily from new spawn maps
+        self._last_action_str  = ''
+        self._last_action_time = 0.0
 
     # ── Utilization ────────────────────────────────────────────────────
 
@@ -157,7 +169,7 @@ class ZoneStrategy:
 
         # Adaptive intensity based on severity
         delta     = best_util - self.HIGH_THRESH
-        intensity = max(1, min(int(delta * 50), 8))
+        intensity = max(1, min(int(delta * 100), 20))
 
         # Find donor: lowest utilization below threshold (not on cooldown)
         donor      = None
@@ -182,81 +194,81 @@ class ZoneStrategy:
     def _find_frontier_grow(self, zone_id, wh):
         """Return candidate cells to convert TO *zone_id*, sorted best-first.
 
-        Candidates: cells not already *zone_id*, with ≥2 of 4 neighbors already
-        in *zone_id* (compactness), inside zonable mask, not occupied.
-        Prefer neutral (zone 0) cells over cells from another zone.
+        Candidates: cells with ≥2 zone-neighbours (compact), inside zonable mask,
+        not occupied.  If ≥2 yields no candidates, falls back to ≥1 neighbour so
+        small or fragmented zones are never permanently stuck.
+        Prefer neutral cells over stealing from another zone.
         Sorted by distance to zone centroid (closest first).
         """
         zm = wh.zoneMap
         mask = self._zonable
         gw, gh = self._gw, self._gh
 
-        # Zone centroid
-        zy, zx = np.where(zm == zone_id)
+        is_zone = (zm == zone_id)  # bool (H, W)
+        zy, zx = np.where(is_zone)
         if len(zx) == 0:
             return []
         cx, cy = float(zx.mean()), float(zy.mean())
 
-        candidates = []
-        for y in range(gh):
-            for x in range(gw):
-                if zm[y, x] == zone_id:
-                    continue
-                if not mask[y, x]:
-                    continue
-                if wh.packagesInWarehouse[y, x]:
-                    continue
-                # Count neighbors in target zone
-                n_in = 0
-                for dx, dy in _NEIGHBORS:
-                    nx, ny = x + dx, y + dy
-                    if 0 <= nx < gw and 0 <= ny < gh and zm[ny, nx] == zone_id:
-                        n_in += 1
-                if n_in < 2:
-                    continue
-                is_neutral = (zm[y, x] == ZONE_NONE)
-                dist = (x - cx) ** 2 + (y - cy) ** 2
-                # Sort key: prefer neutral (0) over occupied-zone (1), then by distance
-                candidates.append((0 if is_neutral else 1, dist, x, y))
+        # Count 4-connected neighbors in the target zone via padded slicing
+        padded = np.zeros((gh + 2, gw + 2), dtype=np.int8)
+        padded[1:-1, 1:-1] = is_zone
+        n_count = (padded[:-2, 1:-1] + padded[2:, 1:-1]
+                   + padded[1:-1, :-2] + padded[1:-1, 2:])  # (H, W)
 
-        candidates.sort()
-        return [(c[2], c[3]) for c in candidates]
+        base = (~is_zone
+                & mask
+                & ~wh.packagesInWarehouse.astype(bool))
+
+        # Try compact (>=2) first; fall back to >=1 if nothing found
+        for min_n in (2, 1):
+            eligible = base & (n_count >= min_n)
+            ey, ex = np.where(eligible)
+            if len(ex) > 0:
+                break
+        if len(ex) == 0:
+            return []
+
+        is_neutral = (zm[ey, ex] == ZONE_NONE).astype(np.int8)  # 0 = neutral, 1 = other
+        dist = (ex.astype(np.float32) - cx) ** 2 + (ey.astype(np.float32) - cy) ** 2
+        # Sort: neutral first (0 before 1), then closest
+        order = np.lexsort((dist, 1 - is_neutral))
+        return list(zip(ex[order].tolist(), ey[order].tolist()))
 
     def _find_frontier_shrink(self, zone_id, wh):
         """Return cells to convert FROM *zone_id* to neutral, sorted best-first.
 
         Candidates: cells in *zone_id* at the frontier (≥1 neighbor not in zone),
         not occupied by a package. Sorted farthest-from-centroid first.
+
+        Uses numpy padded slicing for the neighbor count instead of nested loops.
         """
         zm = wh.zoneMap
         gw, gh = self._gw, self._gh
 
-        zy, zx = np.where(zm == zone_id)
+        is_zone = (zm == zone_id)
+        zy, zx = np.where(is_zone)
         if len(zx) == 0:
             return []
         cx, cy = float(zx.mean()), float(zy.mean())
 
-        candidates = []
-        for y in range(gh):
-            for x in range(gw):
-                if zm[y, x] != zone_id:
-                    continue
-                if wh.packagesInWarehouse[y, x]:
-                    continue
-                # Must be at frontier (at least one neighbor is NOT this zone)
-                at_edge = False
-                for dx, dy in _NEIGHBORS:
-                    nx, ny = x + dx, y + dy
-                    if not (0 <= nx < gw and 0 <= ny < gh) or zm[ny, nx] != zone_id:
-                        at_edge = True
-                        break
-                if not at_edge:
-                    continue
-                dist = (x - cx) ** 2 + (y - cy) ** 2
-                candidates.append((-dist, x, y))   # negative → farthest first
+        # Count 4-connected neighbors that ARE this zone (pad=0 → edges are "not zone")
+        padded = np.zeros((gh + 2, gw + 2), dtype=np.int8)
+        padded[1:-1, 1:-1] = is_zone
+        n_same = (padded[:-2, 1:-1] + padded[2:, 1:-1]
+                  + padded[1:-1, :-2] + padded[1:-1, 2:])  # (H, W)
 
-        candidates.sort()
-        return [(c[1], c[2]) for c in candidates]
+        # Frontier: in-zone, fewer than 4 same-zone neighbors, no package
+        eligible = (is_zone
+                    & ~wh.packagesInWarehouse.astype(bool)
+                    & (n_same < 4))
+        ey, ex = np.where(eligible)
+        if len(ex) == 0:
+            return []
+
+        dist = (ex.astype(np.float32) - cx) ** 2 + (ey.astype(np.float32) - cy) ** 2
+        order = np.argsort(-dist)   # farthest first
+        return list(zip(ex[order].tolist(), ey[order].tolist()))
 
     # ── Apply ──────────────────────────────────────────────────────────
 
@@ -285,6 +297,7 @@ class ZoneStrategy:
             x, y = int(coord[0]), int(coord[1])
             if 0 <= x < gw and 0 <= y < gh:
                 mask[y, x] = False
-        # Exclude cells currently occupied by chargers
+        # Exclude cells currently occupied by chargers or robots
         mask[wh.chargersInWarehouse > 0] = False
+        mask[wh.robotsInWarehouse > 0]   = False
         self._zonable = mask

@@ -18,7 +18,7 @@ class WarehouseOptimizer:
                            all strategies combined.
     """
 
-    MAX_CELLS_PER_SEC = 16
+    MAX_CELLS_PER_SEC = 40
 
     def __init__(self, tick_rate=40):
         """
@@ -38,16 +38,19 @@ class WarehouseOptimizer:
     # ── Per-tick entry point ───────────────────────────────────────────
 
     def step(self, wh):
-        """Called once per sim tick.  Forwards to each enabled strategy."""
-        active = [s for s in self.strategies if s.enabled]
-        if not active:
-            return
-        # Budget: spread the per-second allowance evenly across active
-        # strategies, scaled by each strategy's own EVAL_INTERVAL.
-        for s in active:
+        """Called once per sim tick.  Forwards to all registered strategies.
+
+        Disabled strategies still receive the call so they can advance internal
+        counters (e.g. warmup ticker) — they return immediately without mutating
+        warehouse state.  Budget is calculated against the active-strategy count
+        so enabling a strategy gives it the correct share of the global cap.
+        """
+        active   = [s for s in self.strategies if s.enabled]
+        n_active = max(len(active), 1)
+        for s in self.strategies:
             per_eval = max(1, (self.MAX_CELLS_PER_SEC * s.EVAL_INTERVAL)
                               // max(self._tick_rate, 1)
-                              // max(len(active), 1))
+                              // n_active)
             s.step(wh, per_eval)
 
     # ── Reset (hot-reload) ─────────────────────────────────────────────

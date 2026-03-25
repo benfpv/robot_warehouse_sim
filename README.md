@@ -163,6 +163,7 @@ robot_warehouse_sim/
 - Allow swapping lower-priority packages out of export to unblock higher-priority ones.
 
 ### Traffic & Fleet Navigation
+- **Road/aisle layer** — user-painted or PNG-loaded travel-lane map; robots prefer (soft) or are restricted to (hard) designated road cells, enabling realistic aisle layouts and directional one-way lanes.
 - Collision avoidance between robots.
 - Optimised robot trajectories (shortest path, A* or similar, acceleration modelling).
 - 3rd-party fleet navigation/traffic/planning management integration.
