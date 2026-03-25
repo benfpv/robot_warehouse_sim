@@ -220,7 +220,7 @@ class MapImporter:
         instr = "Paint zones then save as resources/zone_map.png | press L in sim to hot-reload"
         (iw, _), _ = cv2.getTextSize(instr, font, 0.25, 1)
         cv2.putText(img, instr, ((cw - iw) // 2, ch + legend_h - 4),
-                    font, 0.25, (60, 60, 60), 1)
+                    font, 0.25, (85, 85, 85), 1)
 
         # ── Write ─────────────────────────────────────────────────────────
         out_dir = os.path.dirname(os.path.abspath(path))
@@ -570,7 +570,7 @@ class MapImporter:
 
         # Title
         cv2.putText(img, "CHARGER SPAWN MAP  — paint YELLOW where chargers may spawn",
-                    (6, 14), font, 0.28, (80, 80, 80), 1)
+                    (6, 14), font, 0.28, (110, 110, 110), 1)
 
         # Legend strip
         img[canvas_h:canvas_h + 1, :] = 50
@@ -579,7 +579,7 @@ class MapImporter:
         cv2.putText(img, "YELLOW = valid charger spawn cell  (any yellow shade works)",
                     (80, canvas_h + 26), font, 0.30, (120, 200, 200), 1)
         cv2.putText(img, "Black / grey / white = forbidden (no charger spawns here)",
-                    (80, canvas_h + 46), font, 0.28, (80, 80, 80), 1)
+                    (80, canvas_h + 46), font, 0.28, (110, 110, 110), 1)
         instr = "Save as  resources/charger_map.png  |  press L in sim to hot-reload"
         (iw, _), _ = cv2.getTextSize(instr, font, 0.25, 1)
         cv2.putText(img, instr, ((canvas_w - iw) // 2, canvas_h + legend_h - 4),
@@ -626,7 +626,7 @@ class MapImporter:
 
         # Title
         cv2.putText(img, "ROBOT SPAWN MAP  — paint CYAN where robots may spawn",
-                    (6, 14), font, 0.28, (80, 80, 80), 1)
+                    (6, 14), font, 0.28, (110, 110, 110), 1)
 
         # Legend strip
         img[canvas_h:canvas_h + 1, :] = 50
@@ -635,7 +635,7 @@ class MapImporter:
         cv2.putText(img, "CYAN = valid robot spawn cell  (any cyan/teal shade works)",
                     (80, canvas_h + 26), font, 0.30, (200, 200, 80), 1)
         cv2.putText(img, "Black / grey / white = forbidden (no robot spawns here)",
-                    (80, canvas_h + 46), font, 0.28, (80, 80, 80), 1)
+                    (80, canvas_h + 46), font, 0.28, (110, 110, 110), 1)
         instr = "Save as  resources/robot_map.png  |  press L in sim to hot-reload"
         (iw, _), _ = cv2.getTextSize(instr, font, 0.25, 1)
         cv2.putText(img, instr, ((canvas_w - iw) // 2, canvas_h + legend_h - 4),

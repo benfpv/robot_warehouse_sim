@@ -161,6 +161,7 @@ robot_warehouse_sim/
 - Dynamically adaptive zone shapes and sizes — e.g., complex non-rectangular footprints (spirals, L-shapes, multi-level). In real life, a 3D helical layout could exploit gravity to move packages passively from import → storage → export.
 - Dispatch robots to the nearest available charger rather than any idle charger.
 - Allow swapping lower-priority packages out of export to unblock higher-priority ones.
+- **Package location swap** — operator-initiated or scheduler-driven swap of two packages' grid positions (e.g. re-slot a high-urgency package into a more accessible cell), dispatching the minimum robot pair needed to exchange them atomically.
 
 ### Traffic & Fleet Navigation
 - **Road/aisle layer** — user-painted or PNG-loaded travel-lane map; robots prefer (soft) or are restricted to (hard) designated road cells, enabling realistic aisle layouts and directional one-way lanes.

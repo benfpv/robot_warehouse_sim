@@ -32,7 +32,7 @@ class ZoneStrategy:
 
     Public interface consumed by WarehouseOptimizer:
         name            — human-readable name
-        label           — 1-char label for the UI toggle button
+        label           — short label for the UI toggle button
         enabled         — bool, toggled by UI
         EVAL_INTERVAL   — ticks between optimization passes
         step(wh, budget)— called by orchestrator each tick
@@ -40,7 +40,7 @@ class ZoneStrategy:
     """
 
     name  = 'Zone'
-    label = 'Z'
+    label = 'AUTO'   # shown on the right-strip toggle button in the zone-map panel
 
     # ── Tuning constants ──────────────────────────────────────────────
     EVAL_INTERVAL   = 20      # ticks between passes (~0.5 sec at 40 tps)

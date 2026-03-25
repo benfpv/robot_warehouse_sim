@@ -39,8 +39,10 @@ class PaintHandler:
 
     # Height (px) of the zone-button strip at the bottom of the zone-map panel.
     BUTTON_H = 16
-    # Width (px) of the vertical brush-size strip on the right of the zone-map panel.
-    BRUSH_W  = 16
+    # Width (px) of the vertical brush-size / strategy-toggle strip on the right.
+    # Wide enough to render up to 4-character strategy labels (e.g. "AUTO") at
+    # small font scale without clipping.
+    BRUSH_W  = 20
     # Zone/erase buttons (bottom strip, full panel width) — (zone_id, short label)
     _BUTTONS = [
         (ZONE_NONE,    'CLR'),
@@ -222,7 +224,7 @@ class PaintHandler:
 
         Layout (within the zone_view_rect panel):
           Right  BRUSH_W px (top):    vertical brush size selectors — 1 / 3 / 5
-          Right  BRUSH_W px (bottom): strategy toggle buttons — e.g. Z
+          Right  BRUSH_W px (bottom): strategy toggle buttons — e.g. AUTO
           Bottom BUTTON_H px (full):  zone / erase selectors  — CLR|IMP|STO|EXP
 
         Args:
@@ -308,7 +310,13 @@ class PaintHandler:
                 if i < n_s - 1:
                     composite[by1 - 1:by1, brush_x:vx0 + vw] = (36, 36, 36)
                 lbl = s.label
-                (tw, th), _ = cv2.getTextSize(lbl, font, 0.22, 1)
+                # Auto-scale font so even multi-char labels (e.g. 'AUTO') fit inside
+                # the BRUSH_W-wide strip without clipping.
+                _s_scale = 0.22
+                (tw, th), _ = cv2.getTextSize(lbl, font, _s_scale, 1)
+                while tw > brush_w - 2 and _s_scale > 0.12:
+                    _s_scale = round(_s_scale - 0.02, 2)
+                    (tw, th), _ = cv2.getTextSize(lbl, font, _s_scale, 1)
                 tx = brush_x + (brush_w - tw) // 2
                 ty = by0 + (by1 - by0 + th) // 2
-                cv2.putText(composite, lbl, (tx, ty), font, 0.22, text_col, 1)
+                cv2.putText(composite, lbl, (tx, ty), font, _s_scale, text_col, 1)
