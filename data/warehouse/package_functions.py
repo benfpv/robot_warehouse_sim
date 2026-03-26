@@ -61,17 +61,12 @@ class Package_Functions:
         while addressTo == addressFrom:
             addressTo = random.sample(sorted(addressesList), 1)[0]
         todaysDate = datetime.now()
-        # generate deadline
-        deltaDays = timedelta(days=random.randint(0,1))
-        deltaHours = timedelta(hours=random.randint(0,1))
-        deltaMinutes = timedelta(minutes=random.randint(0,10))
-        deltaSeconds = timedelta(seconds=random.randint(0,120))
-        #deltaSeconds = timedelta(seconds=random.randint(0,1))
-        deadline = todaysDate + deltaDays + deltaHours + deltaMinutes + deltaSeconds
-        deadline = todaysDate + deltaMinutes + deltaSeconds
-        # calculate timeToDeadline
+        # generate deadline (tight windows for debugging)
+        deltaSeconds = timedelta(seconds=random.randint(10, 90))
+        deadline = todaysDate + deltaSeconds
+        # timeToDeadline is recomputed from deadline each sim tick;
+        # initialise to the full span so the Package constructor has a valid value.
         timeToDeadline = deadline - todaysDate
-        timeToDeadline = timeToDeadline/60
         #g = random.randint(1,254)
         #r = random.randint(1,254)
         #b = random.randint(1,254)

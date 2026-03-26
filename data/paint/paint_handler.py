@@ -295,28 +295,34 @@ class PaintHandler:
         # ── Strategy toggle buttons (bottom of right strip) ──────────
         if n_s > 0:
             strat_y0 = vy0 + n_b * slot_h
-            # Separator between brush and strategy sections
-            composite[strat_y0 - 1:strat_y0, brush_x:vx0 + vw] = (48, 48, 48)
+            # Amber 2px separator — visually breaks strategy section from brush buttons
+            composite[strat_y0 - 2:strat_y0, brush_x:vx0 + vw] = (30, 90, 130)
             strat_h = map_h - n_b * slot_h
             for i, s in enumerate(strategies):
                 by0 = strat_y0 + i * strat_h // n_s
                 by1 = strat_y0 + (i + 1) * strat_h // n_s
                 if s.enabled:
-                    composite[by0:by1, brush_x + 2:vx0 + vw] = (24, 40, 24)
-                    composite[by0:by1, brush_x:brush_x + 2]   = (60, 200, 60)
-                    text_col = (80, 220, 80)
+                    # Warm amber tint background + left accent bar
+                    composite[by0:by1, brush_x:vx0 + vw]       = (18, 35, 45)
+                    composite[by0:by1, brush_x:brush_x + 2]     = (40, 160, 220)
+                    # Right accent bar (mirrors left, reinforces active state)
+                    composite[by0:by1, vx0 + vw - 2:vx0 + vw]  = (40, 160, 220)
+                    text_col = (100, 210, 255)
                 else:
-                    text_col = (55, 55, 55)
+                    composite[by0:by1, brush_x:vx0 + vw]       = (16, 20, 22)
+                    composite[by0:by1, brush_x:brush_x + 2]     = (40, 55, 65)
+                    composite[by0:by1, vx0 + vw - 2:vx0 + vw]  = (40, 55, 65)
+                    text_col = (60, 80, 95)
                 if i < n_s - 1:
                     composite[by1 - 1:by1, brush_x:vx0 + vw] = (36, 36, 36)
                 lbl = s.label
-                # Auto-scale font so even multi-char labels (e.g. 'AUTO') fit inside
-                # the BRUSH_W-wide strip without clipping.
-                _s_scale = 0.22
-                (tw, th), _ = cv2.getTextSize(lbl, font, _s_scale, 1)
-                while tw > brush_w - 2 and _s_scale > 0.12:
-                    _s_scale = round(_s_scale - 0.02, 2)
-                    (tw, th), _ = cv2.getTextSize(lbl, font, _s_scale, 1)
-                tx = brush_x + (brush_w - tw) // 2
-                ty = by0 + (by1 - by0 + th) // 2
-                cv2.putText(composite, lbl, (tx, ty), font, _s_scale, text_col, 1)
+                # Stack each character vertically so long labels (e.g. 'AUTO')
+                # fit the narrow BRUSH_W strip without shrinking to illegibility.
+                _chars   = list(lbl)
+                _n_chars = max(len(_chars), 1)
+                _btn_h_s = by1 - by0
+                for _ci, _ch in enumerate(_chars):
+                    (_cw_c, _ch_c), _ = cv2.getTextSize(_ch, font, 0.22, 1)
+                    _ctx = brush_x + (brush_w - _cw_c) // 2
+                    _cty = by0 + (_ci * _btn_h_s // _n_chars) + _btn_h_s // (2 * _n_chars) + _ch_c // 2
+                    cv2.putText(composite, _ch, (_ctx, _cty), font, 0.22, text_col, 1)

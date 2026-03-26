@@ -8,27 +8,30 @@ A real-time autonomous warehouse simulation. Robots dynamically pick up, transpo
 
 ## Features
 
-- **Warehouse zones** — three horizontal bands (import / storage / export); packages enter via import and exit when exported from the export zone before their deadline.
-- **Packages** — each has a unique ID, real-time position & status, a deadline-to-export, colour-coded urgency, age tracking (`createdAt`), and a full import-to-export history log.
-- **Robots** — up to 60 robots, each with a priority-based action queue, dynamic battery depletion, automatic charging dispatch, age tracking (`createdAt`), and single-package carrying capacity.
-- **Chargers** — up to 10 charging stations spawned along the warehouse perimeter; robots are dispatched when battery ≤ 20 %. Charger exclusivity is enforced via action-queue ground-truth checks with per-tick stale-reservation reconciliation and an arrival guard.
+- **Warehouse zones** — three zone types (import / storage / export) painted on an 80×70 grid; packages enter via import and exit when exported from the export zone before their deadline.  Zones can be painted interactively or loaded from a PNG map file.
+- **Adaptive zone optimizer** — monitors per-zone utilization via EMA and automatically swaps boundary cells between zone types to rebalance capacity.  Zone-swap only: no zone is ever eliminated and no new zones are created from neutral space.
+- **Packages** — each has a unique ID, real-time position & status, a deadline-to-export (10–90 s), colour-coded urgency, age tracking (`createdAt`), and a full import-to-export history log.  Urgency-based routing sends near-deadline packages to export and others to storage.
+- **Robots** — up to 60 robots, each with a priority-based action queue, dynamic battery depletion with adaptive eco-mode, automatic charging dispatch, age tracking (`createdAt`), and single-package carrying capacity.
+- **Chargers** — up to 10 charging stations; robots are dispatched when battery falls below a dynamic threshold (25–50 %, adapts to charger pressure). Charger exclusivity is enforced via action-queue ground-truth checks with per-tick stale-reservation reconciliation and an arrival guard.
+- **Flow control** — adaptive import cap targeting ~50 % warehouse occupancy with proportional correction, overdue/stress penalties, and idle-robot bonus.
+- **Dynamic planning depth** — the package move pipeline is capped at `available_robots × 2` to avoid over-planning when many robots are charging or busy.
 - **Task scheduler** — the warehouse assigns packages to robots deadline-first, respects zone capacity, and avoids duplicate movement effort via `packagesMoveList` / `packagesMovingList`.
-- **Sim / draw decoupling** — simulation ticks at 40 Hz; display repaints at 20 fps independently to save CPU.
+- **Sim / draw decoupling** — simulation ticks at 40 Hz; display repaints at 15 fps independently to save CPU.
 - **Rolling chart histories** — 1 800 samples at 1 sample/s (~30 min), with a dynamic time-window that grows from 30 s to the full history length.
 - **Overflow-safe display** — all number fields use `_n()` (K/M abbreviation), `_fmt_elapsed()` / `_fmt_age()` (decade-aware), `_fmt_rate()` (K/M/s), and a 3-tier cascade (full → drop rate suffix → char-trim + …). The sim is designed to run for days, months, or years without text bleeding out of any panel.
 
-## Dashboard Layout (800 × 575 px)
+## Dashboard Layout (960 × 540 px)
 
 ```
-┌──────────────────────┬─────────┬─────────┬─────────┐
-│                      │Chargers │Packages │Zone Map │  ← sub-views (160×140 each)
-│   Main view          ├─────────┼─────────┼─────────┤
-│   (320×280, 4× zoom) │ Robots  │Pkg Tgts │Sim Stats│
-├──────────────────────┴─────────┴─────────┴─────────┤
-│  Info panel — ROBOTS | CHARGERS | PACKAGES  (165px) │
-├─────────────────────────────────────────────────────┤
-│  Charts — Exports/Overdue | Zone Bars | Fleet (130px)│
-└─────────────────────────────────────────────────────┘
+┌──────────────────────┬─────────┬─────────┬─────────┬──────────┐
+│                      │Chargers │Packages │Zone Map │Deadlines │  ← sub-views (160×140)
+│   Main view          ├─────────┼─────────┼─────────┤Fleet Batt│
+│   (320×280, 4× zoom) │ Robots  │Pkg Tgts │Heatmap  │ (empty)  │
+├──────────┬───────────┴─────────┼─────────┼─────────┴──────────┤
+│  ROBOTS  │  CHARGERS           │SIM STATS│  PACKAGES          │  ← info panel 4×240px
+├──────────┴──────────┬──────────┴─────────┬──────────┬─────────┤
+│ Exports/Overdue     │ Flow Control       │Zone Bars │ Fleet   │  ← chart strip 4×240px
+└─────────────────────┴────────────────────┴──────────┴─────────┘
 ```
 
 **Main view colour legend:**
@@ -47,14 +50,23 @@ A real-time autonomous warehouse simulation. Robots dynamically pick up, transpo
 | Orange dots | Overdue packages planned for movement |
 | Red dots | Overdue packages with no plan |
 
-**Info panel** shows top-7 active robots (sorted by task urgency) + top-3 lowest-battery robots, top-10 chargers, and top-10 packages nearest deadline — all colour-coded by state. All text is clipped to its column boundary with overflow protection.
+**Info panel** (4 columns × 240 px) shows:
+- **ROBOTS** — top-7 active robots (sorted by task urgency) + top-7 lowest-battery robots, colour-coded by state.
+- **CHARGERS** — charger status + fleet power summary (avg battery, drain, pressure, threshold, working/charging/idle counts).
+- **SIM STATS** — elapsed time, loop count, exports, package count, robot count, zone fill levels with rates, zone utilization, and optimizer status.
+- **PACKAGES** — all packages sorted by deadline urgency with zone, target, carrier, status, weight, item name and destination.
 
-**Chart strip** shows a dynamically growing time window (starts at 30 s, expands to 30 min):
+All text is clipped to its column boundary with overflow protection.
+
+**Chart strip** (4 charts × 240 px) shows a dynamically growing time window (starts at 30 s, expands to 30 min):
 - *Exports & Overdue* — cumulative exports (+ rate), total late (+ rate), and current instantaneous overdue count (+ rate)
+- *Flow Control* — import cap, throughput/min, avg delivery time, overdue % (fixed 0–100 scale)
 - *Zone Capacity* — live fill bars for import / storage / export with count, rate, and occupancy percentage
-- *Fleet Health* — mean battery % (+ rate), robot count, robots needing charge (+ rate), robots actively charging (+ rate)
+- *Fleet Health* — mean battery % (+ rate), robot count, robots needing charge (+ rate), robots actively charging (+ rate), idle count
 
-**Sim Stats panel** shows: elapsed time (decade-aware), loop count, exports, package count, robot count, charger count, zone fill levels with rates, and newest/oldest package (identified by P#).
+**Top-right panels:**
+- *Deadlines* — 5-band urgency histogram (OVR/CRIT/URG/NRML/CMFT) with per-band count and percentage
+- *Fleet Batt* — horizontal bar chart showing every robot's battery level sorted ascending, with status indicators (charging/en-route/saving/carrying) and dynamic charge threshold line
 
 ---
 
@@ -92,9 +104,9 @@ All key parameters live in two places:
 | `warehouse_res` | `(80, 70)` | Grid cell dimensions (width × height) |
 | `warehouse_windowRes` | `(320, 280)` | Display size of main view (4× upscale) |
 | `sim_frametime` | `1/40` | Simulation tick rate (s) |
-| `draw_frametime` | `1/20` | Display repaint rate (s) |
+| `draw_frametime` | `1/15` | Display repaint rate (s) |
 | `panel_h` | `165` | Info panel height (px) |
-| `chart_h` | `130` | Chart strip height (px) |
+| `chart_h` | `95` | Chart strip height (px) |
 
 **`data/warehouse/warehouse.py` — `Warehouse.__init__`**
 
@@ -114,10 +126,14 @@ Zone geometry (pad, thirds) is set in `data/warehouse/warehouse_init.py` → `in
 ```
 robot_warehouse_sim/
 ├── main.py                          # Entry point, MainGame, composite display, charts
+├── cvplt.py                         # Minimal OpenCV line-plot utility
 ├── requirements.txt
 ├── resources/
 │   ├── list_items.csv               # Item catalogue loaded at startup
-│   └── list_addresses.csv           # Address list for package origin/destination
+│   ├── list_addresses.csv           # Address list for package origin/destination
+│   ├── zone_map.png                 # (auto-generated) zone layout loaded at startup
+│   ├── charger_map.png              # (optional) custom charger spawn positions
+│   └── robot_map.png                # (optional) custom robot spawn positions
 └── data/
     ├── functions.py                 # General utility functions (grid, perimeter, cardinal)
     ├── functions_timeseries.py      # Rolling array helpers
@@ -128,14 +144,18 @@ robot_warehouse_sim/
     │   └── display_functions.py     # Borderless Win32 window setup
     ├── draw/
     │   └── draw_warehouse.py        # All OpenCV draw helpers (zones, robots, packages, arrows)
+    ├── paint/
+    │   ├── paint_handler.py         # Interactive zone painting UI (mouse + keyboard)
+    │   ├── map_importer.py          # PNG zone/spawn map loader and example generators
+    │   ├── zone_strategy.py         # Adaptive zone rebalancing (zone-swap only)
+    │   └── warehouse_optimizer.py   # Strategy orchestrator (tick budget, strategy dispatch)
     └── warehouse/
-        ├── warehouse.py             # Core simulation loop and all update methods
+        ├── warehouse.py             # Core simulation loop, flow control, and all update methods
         ├── warehouse_init.py        # Grid / zone map initialisation
-        ├── warehouse_functions.py   # (Reserved for future warehouse-level helpers)
         ├── warehouse_data.py        # Rolling timeseries data container
-        ├── warehouse_log.py         # Log record classes
+        ├── warehouse_log.py         # Log record classes (Packages_Log, Robots_Log)
         ├── package.py               # Package dataclass
-        ├── package_functions.py     # Package spawn, target selection, generation
+        ├── package_functions.py     # Package spawn, target selection, deadline generation
         ├── charger.py               # Charger dataclass
         ├── charger_functions.py     # Charger spawn and generation
         ├── robot.py                 # Robot dataclass
@@ -146,12 +166,14 @@ robot_warehouse_sim/
 
 ## Known Issues
 
-- When the export zone fills completely, already-planned package movements are not cancelled or re-prioritised in real time; robots may continue heading toward a full export zone until the next scheduler pass. (See *Dynamic priority switching* in Future Directions.)
+- When the export zone fills completely, already-planned package movements are not cancelled or re-prioritised in real time; robots may continue heading toward a full export zone until the next scheduler pass.
+- Robot movement is straight-line (beeline via atan2 → cardinal direction); there is no pathfinding or collision avoidance.
 
 ## Limitations
 
-- Import / storage / export zones must be rectangular and stacked vertically (horizontal bands, top: import → middle: storage → bottom: export). More complex area geometries are not currently supported.
 - Windows-only: borderless window setup uses Win32 via `ctypes`.
+- No obstacle support: the grid is fully traversable with no walls or blocked cells.
+- Zone painting and auto-zoning operate on a flat 2D grid; non-rectangular or multi-level layouts are not supported.
 
 ## Future Directions
 

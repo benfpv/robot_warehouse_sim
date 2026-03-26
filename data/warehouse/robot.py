@@ -23,6 +23,7 @@ class Robot:
         self.carrying = carrying
         self.carrier = carrier
         self.createdAt = time.time()
+        self.batteryDrainMultiplier = 1.0
 
 class Robot_Log:
     def __init__(self, action, datetimeNow):

@@ -45,7 +45,7 @@ class Charger_Functions:
         #print('- generate_robot')
         chargerNumber = chargersRollingCount
         colour = (50, 160, 160)
-        area = 'import'
+        area = 'neutral'
         xyLocation = xyLocationSpawn
         status = 'idle' # idle, charging
         charger = Charger(chargerNumber, colour, area, xyLocation, status)

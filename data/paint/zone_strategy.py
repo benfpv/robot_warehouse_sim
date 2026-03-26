@@ -1,8 +1,12 @@
 """ZoneStrategy — dynamically rebalances import/storage/export zones.
 
 Monitors per-zone utilization via an exponential moving average, identifies
-bottleneck (over-utilized) and donor (under-utilized or neutral) zones, then
-incrementally grows/shrinks zone boundaries at their frontiers.
+bottleneck (over-utilized) and donor (under-utilized) zones, then
+incrementally converts donor-zone boundary cells into the bottleneck zone.
+
+Zone swaps only: cells change from one zone type to another — no zone is
+ever eliminated (MIN_ZONE_CELLS guard) and no new zone cells are created
+from neutral space.  The total zoned footprint is invariant.
 
 Mutations go through ``wh.pending_zone_changes`` so the existing
 ``reconcile_zone_changes()`` pipeline handles in-flight package safety.
@@ -22,9 +26,6 @@ _ZONE_NAMES = {ZONE_NONE: 'neutral', ZONE_IMPORT: 'import',
 # Short abbreviations used in the UI stats line where space is tight
 _ZONE_ABBR  = {ZONE_NONE: 'clr', ZONE_IMPORT: 'imp',
                ZONE_STORAGE: 'sto', ZONE_EXPORT: 'exp'}
-
-# 4-connected neighbor offsets
-_NEIGHBORS = [(-1, 0), (1, 0), (0, -1), (0, 1)]
 
 
 class ZoneStrategy:
@@ -67,8 +68,13 @@ class ZoneStrategy:
 
     # ── Orchestrator interface ─────────────────────────────────────────
 
-    def step(self, wh, budget):
-        """Called every tick by the orchestrator when enabled."""
+    def step(self, wh, budget, heatmap_slow=None):
+        """Called every tick by the orchestrator when enabled.
+
+        Args:
+            heatmap_slow: float32 (H×W) slow-decay traffic heatmap passed through
+                          from the orchestrator.  Reserved for future road-logic use.
+        """
         self._total += 1   # always advance so warmup measures sim age, not enable age
         if not self.enabled:
             return
@@ -89,28 +95,20 @@ class ZoneStrategy:
             return
         grow_zone, shrink_zone, intensity = action
         intensity = min(intensity, budget)
-        n_grow = n_shrink = 0
-        if grow_zone is not None:
-            cells = self._find_frontier_grow(grow_zone, wh)[:intensity]
-            self._apply(wh, cells, grow_zone)
-            n_grow = len(cells)
-        if shrink_zone is not None and shrink_zone != ZONE_NONE:
-            cells = self._find_frontier_shrink(shrink_zone, wh)[:intensity]
-            self._apply(wh, cells, ZONE_NONE)
-            n_shrink = len(cells)
-        if n_grow or n_shrink:
-            parts = []
-            if n_grow:
-                parts.append('+{} {}'.format(n_grow, _ZONE_ABBR[grow_zone]))
-            if n_shrink:
-                parts.append('-{} {}'.format(n_shrink, _ZONE_ABBR[shrink_zone]))
-            # Only cool down the donor (shrunk zone) — not the bottleneck.
-            # The bottleneck must remain free to keep growing every eval until
-            # utilization drops below HIGH_THRESH.
-            if shrink_zone is not None and shrink_zone != ZONE_NONE:
-                self._cooldown[shrink_zone] = self.COOLDOWN_MULTI * self.EVAL_INTERVAL
-            self._last_action_str  = ', '.join(parts)
-            self._last_action_time = time.time()
+        # Zone-swap: find donor frontier cells adjacent to the bottleneck zone
+        # and convert them directly (donor → bottleneck).  No neutral intermediary.
+        if shrink_zone is None or shrink_zone == ZONE_NONE:
+            return   # no valid donor — skip
+        cells = self._find_swap_frontier(shrink_zone, grow_zone, wh)[:intensity]
+        if not cells:
+            return
+        self._apply(wh, cells, grow_zone)
+        n_swapped = len(cells)
+        self._last_action_str  = '{} {} -> {}'.format(
+            n_swapped, _ZONE_ABBR[shrink_zone], _ZONE_ABBR[grow_zone])
+        self._last_action_time = time.time()
+        # Cool down the donor so it isn't drained continuously
+        self._cooldown[shrink_zone] = self.COOLDOWN_MULTI * self.EVAL_INTERVAL
 
     def reset(self, wh):
         """Reset internal state (called on hot-reload).
@@ -147,9 +145,11 @@ class ZoneStrategy:
     # ── Decision ───────────────────────────────────────────────────────
 
     def _decide_action(self, wh):
-        """Determine which zone to grow and which to shrink.
+        """Determine which zone to grow (bottleneck) and which to shrink (donor).
 
-        Returns (grow_zone_id, shrink_zone_id, intensity) or None.
+        Only zone-to-zone swaps are permitted — no zone may be eliminated and
+        no new zones are created from neutral space.  Returns
+        ``(grow_zone_id, shrink_zone_id, intensity)`` or ``None``.
         """
         slot_counts = {
             ZONE_IMPORT:  wh.numberOfImportSlots,
@@ -171,7 +171,8 @@ class ZoneStrategy:
         delta     = best_util - self.HIGH_THRESH
         intensity = max(1, min(int(delta * 100), 20))
 
-        # Find donor: lowest utilization below threshold (not on cooldown)
+        # Find donor: lowest utilization below threshold, not on cooldown,
+        # and still above MIN_ZONE_CELLS so it cannot be eliminated.
         donor      = None
         worst_util = self.LOW_THRESH
         for z in _ZONE_IDS:
@@ -185,89 +186,53 @@ class ZoneStrategy:
                 worst_util = self._util_ema[z]
                 donor = z
 
-        # If no zone donor is available, grow from neutral cells (no shrink)
-        # donor = None means only grow (from neutral), don't shrink any zone
+        if donor is None:
+            return None   # no valid donor — do nothing
+
         return (bottleneck, donor, intensity)
 
     # ── Frontier selection ─────────────────────────────────────────────
 
-    def _find_frontier_grow(self, zone_id, wh):
-        """Return candidate cells to convert TO *zone_id*, sorted best-first.
+    def _find_swap_frontier(self, donor_zone, target_zone, wh):
+        """Return donor-zone cells on the shared boundary with *target_zone*.
 
-        Candidates: cells with ≥2 zone-neighbours (compact), inside zonable mask,
-        not occupied.  If ≥2 yields no candidates, falls back to ≥1 neighbour so
-        small or fragmented zones are never permanently stuck.
-        Prefer neutral cells over stealing from another zone.
-        Sorted by distance to zone centroid (closest first).
+        Only cells that are:
+          - in *donor_zone*
+          - adjacent (4-connected) to at least one *target_zone* cell
+          - not occupied by a package
+          - inside the zonable mask
+        are eligible.  Sorted farthest-from-donor-centroid first (peel from
+        outside in to keep the donor compact).
         """
         zm = wh.zoneMap
         mask = self._zonable
         gw, gh = self._gw, self._gh
 
-        is_zone = (zm == zone_id)  # bool (H, W)
-        zy, zx = np.where(is_zone)
-        if len(zx) == 0:
-            return []
-        cx, cy = float(zx.mean()), float(zy.mean())
+        is_donor  = (zm == donor_zone)
+        is_target = (zm == target_zone)
 
-        # Count 4-connected neighbors in the target zone via padded slicing
+        # Centroid of donor for distance sorting
+        dy, dx = np.where(is_donor)
+        if len(dx) == 0:
+            return []
+        cx, cy = float(dx.mean()), float(dy.mean())
+
+        # Count 4-connected neighbours that belong to target zone
         padded = np.zeros((gh + 2, gw + 2), dtype=np.int8)
-        padded[1:-1, 1:-1] = is_zone
-        n_count = (padded[:-2, 1:-1] + padded[2:, 1:-1]
-                   + padded[1:-1, :-2] + padded[1:-1, 2:])  # (H, W)
+        padded[1:-1, 1:-1] = is_target
+        n_target = (padded[:-2, 1:-1] + padded[2:, 1:-1]
+                    + padded[1:-1, :-2] + padded[1:-1, 2:])  # (H, W)
 
-        base = (~is_zone
-                & mask
-                & ~wh.packagesInWarehouse.astype(bool))
-
-        # Try compact (>=2) first; fall back to >=1 if nothing found
-        for min_n in (2, 1):
-            eligible = base & (n_count >= min_n)
-            ey, ex = np.where(eligible)
-            if len(ex) > 0:
-                break
-        if len(ex) == 0:
-            return []
-
-        is_neutral = (zm[ey, ex] == ZONE_NONE).astype(np.int8)  # 0 = neutral, 1 = other
-        dist = (ex.astype(np.float32) - cx) ** 2 + (ey.astype(np.float32) - cy) ** 2
-        # Sort: neutral first (0 before 1), then closest
-        order = np.lexsort((dist, 1 - is_neutral))
-        return list(zip(ex[order].tolist(), ey[order].tolist()))
-
-    def _find_frontier_shrink(self, zone_id, wh):
-        """Return cells to convert FROM *zone_id* to neutral, sorted best-first.
-
-        Candidates: cells in *zone_id* at the frontier (≥1 neighbor not in zone),
-        not occupied by a package. Sorted farthest-from-centroid first.
-
-        Uses numpy padded slicing for the neighbor count instead of nested loops.
-        """
-        zm = wh.zoneMap
-        gw, gh = self._gw, self._gh
-
-        is_zone = (zm == zone_id)
-        zy, zx = np.where(is_zone)
-        if len(zx) == 0:
-            return []
-        cx, cy = float(zx.mean()), float(zy.mean())
-
-        # Count 4-connected neighbors that ARE this zone (pad=0 → edges are "not zone")
-        padded = np.zeros((gh + 2, gw + 2), dtype=np.int8)
-        padded[1:-1, 1:-1] = is_zone
-        n_same = (padded[:-2, 1:-1] + padded[2:, 1:-1]
-                  + padded[1:-1, :-2] + padded[1:-1, 2:])  # (H, W)
-
-        # Frontier: in-zone, fewer than 4 same-zone neighbors, no package
-        eligible = (is_zone
-                    & ~wh.packagesInWarehouse.astype(bool)
-                    & (n_same < 4))
+        eligible = (is_donor
+                    & mask
+                    & (n_target >= 1)
+                    & ~wh.packagesInWarehouse.astype(bool))
         ey, ex = np.where(eligible)
         if len(ex) == 0:
             return []
 
         dist = (ex.astype(np.float32) - cx) ** 2 + (ey.astype(np.float32) - cy) ** 2
-        order = np.argsort(-dist)   # farthest first
+        order = np.argsort(-dist)   # farthest from donor centroid first
         return list(zip(ex[order].tolist(), ey[order].tolist()))
 
     # ── Apply ──────────────────────────────────────────────────────────

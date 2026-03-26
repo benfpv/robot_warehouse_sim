@@ -27,7 +27,7 @@ class MainGame:
         self.exit = False
         # User Parameters
         self.warehouse_res = (80,70)
-        self.warehouse_windowBackgroundColour = [50,50,50]
+        self.warehouse_windowBackgroundColour = [30,30,30]
         self.warehouse_windowRes = (320, 280) # upsized resolution (width, height)
         self.sim_frametime  = 1 / 40   # 40 sim ticks/sec
         self.draw_frametime = 1 / 15   # 15 display fps (reduced to save power)
@@ -119,22 +119,25 @@ class MainGame:
         self._hist_need_charge = np.zeros(_H, dtype=np.float32)
         self._hist_charging   = np.zeros(_H, dtype=np.float32)
         self._hist_idle       = np.zeros(_H, dtype=np.float32)
+        # Flow-control history arrays
+        self._hist_import_cap   = np.zeros(_H, dtype=np.float32)
+        self._hist_throughput   = np.zeros(_H, dtype=np.float32)
+        self._hist_delivery     = np.zeros(_H, dtype=np.float32)
+        self._hist_overdue_pct  = np.zeros(_H, dtype=np.float32)
         self._hist_tick     = 0
         self._hist_count    = 0          # samples actually filled so far
         self._hist_min_win  = 30         # minimum visible window (seconds)
-        self._hist_sample_every = max(1, round(1.0 / self.draw_frametime))  # draws per second
+        self._hist_last_sample = 0.0     # wall-clock time of last 1 Hz sample
         # Rate-of-change tracking (snapshot every 1s sample)
         self._prev_stats = None   # dict of key→value at last sample
         self._rate_stats = {}     # dict of key→delta/sec
         # Robot traffic heatmap — accumulated robotsInWarehouse, decayed each tick
         gw, gh = self.warehouse_res
-        self._robot_heatmap = np.zeros((gh, gw), dtype=np.float32)
+        self._robot_heatmap      = np.zeros((gh, gw), dtype=np.float32)  # fast (~8 s half-life)
+        self._robot_heatmap_slow = np.zeros((gh, gw), dtype=np.float32)  # slow (~5 min half-life)
         # Optimizer action log: ring buffer of (timestamp, action_str), newest last
         self._opt_log: list = []
         self._last_seen_opt_str = ''
-        # Sub-view tab state: (row, col) → current tab index; cycled by the
-        # panel-embedded tab-button strip (mouse click, no keyboard required).
-        self._sv_tabs: dict = {(1, 3): 0}   # slot (1,3): 0=DEADLINES  1=FLEET BATT
         screen_w, screen_h = Display_Functions.get_screen_resolution()
         cx = (screen_w - self.composite_windowRes[0]) // 2
         cy = (screen_h - self.composite_windowRes[1]) // 2
@@ -146,27 +149,8 @@ class MainGame:
     # ── Mouse callback ──────────────────────────────────────────────────
 
     def _on_mouse(self, event, px, py, flags, param):
-        """Composite cv2 mouse callback.
-
-        Delegates painting/zone-button events to PaintHandler, then handles
-        the tab-selector strip at the bottom of sub-view slot (row 1, col 3).
-
-        The tab strip occupies the bottom ``_SV_TAB_H`` rows of that panel:
-            composite[sh*2 - _SV_TAB_H : sh*2,  mw+sw*3 : mw+sw*4]
-        A left-click anywhere on the strip advances slot (1,3) to the next tab.
-        """
+        """Composite cv2 mouse callback. Delegates all events to PaintHandler."""
         self.paint_handler.on_mouse(event, px, py, flags, param)
-        if event == cv2.EVENT_LBUTTONDOWN:
-            mw, mh = self.warehouse_windowRes
-            sw, sh = self.sub_windowRes
-            _TAB_H = 10   # must match _SV_TAB_H used in gameDraw
-            _tb_x0 = mw + sw * 3
-            _tb_y0 = sh * 2 - _TAB_H
-            _tb_x1 = mw + sw * 4
-            _tb_y1 = sh * 2
-            if _tb_x0 <= px < _tb_x1 and _tb_y0 <= py < _tb_y1:
-                _n_tabs_13 = 2   # DEADLINES (0) + FLEET BATT (1)
-                self._sv_tabs[(1, 3)] = (self._sv_tabs.get((1, 3), 0) + 1) % _n_tabs_13
 
     # ── Formatting helpers ──────────────────────────────────────────────
 
@@ -242,15 +226,19 @@ class MainGame:
             return self
 
         # Update Existing
-        self.optimizer.step(self.warehouse)
+        self.optimizer.step(self.warehouse, self._robot_heatmap_slow)
         self.warehouse = self.warehouse.update_warehouse()
         # Accumulate robot traffic heatmap — only moving robots, not idle/charging
+        # Decay is time-anchored: per-tick factor = 0.5^(dt / half_life), so the
+        # visible window stays constant regardless of sim speed or FPS setting.
         _STATIC = {'idle', 'charging'}
-        self._robot_heatmap *= 0.9994
+        self._robot_heatmap      *= 0.5 ** (self.sim_frametime / 8.0)
+        self._robot_heatmap_slow *= 0.5 ** (self.sim_frametime / 300.0)  # 5-min half-life
         for _rb in self.warehouse.robots:
             if _rb.status not in _STATIC:
                 _rx, _ry = _rb.xyLocation
-                self._robot_heatmap[_ry, _rx] += 1.0
+                self._robot_heatmap[_ry, _rx]      += 1.0
+                self._robot_heatmap_slow[_ry, _rx] += 1.0
 
         # Draw (rate-limited independently of sim)
         now = time.time()
@@ -311,7 +299,9 @@ class MainGame:
             _hm_visited = self._robot_heatmap > 0
             _hm_pct = float(np.percentile(self._robot_heatmap[_hm_visited], 98)) if _hm_visited.any() else _hm_max
             _hm_clip = max(_hm_pct, _hm_max * 0.05)   # never clip below 5 % of true peak
-            _hm_norm = np.clip(np.sqrt(self._robot_heatmap / _hm_clip) * 255, 0, 255).astype(np.uint8)
+            # Power 1.5 > 1.0: pushes dim/stale cells toward black, keeps active
+            # hotspots bright — more spatial contrast than sqrt (which boosted mid-range).
+            _hm_norm = np.clip((self._robot_heatmap / _hm_clip) ** 1.5 * 255, 0, 255).astype(np.uint8)
         else:
             _hm_norm = np.zeros_like(self._robot_heatmap, dtype=np.uint8)
         _hm_resized = cv2.resize(_hm_norm, (sw, sh), interpolation=cv2.INTER_NEAREST)
@@ -321,6 +311,24 @@ class MainGame:
             (_hm_norm == 0).astype(np.uint8), (sw, sh), interpolation=cv2.INTER_NEAREST)
         _hm_col[_hm_zero_mask > 0] = (0, 0, 0)
         composite[sh:2*sh, mw+sw*2:mw+sw*3] = _hm_col
+
+        # Slow-heatmap overlay — persistent route layer (~5 min half-life).
+        # Rendered as a warm-white brightness boost so historically-busy corridors
+        # glow even when no robot is currently there, without hiding the JET colours.
+        _slow_max = self._robot_heatmap_slow.max()
+        if _slow_max > 0:
+            _slow_visited = self._robot_heatmap_slow > 0
+            _slow_pct  = float(np.percentile(self._robot_heatmap_slow[_slow_visited], 98)) if _slow_visited.any() else _slow_max
+            _slow_clip = max(_slow_pct, _slow_max * 0.05)
+            _slow_norm = np.clip((self._robot_heatmap_slow / _slow_clip) ** 1.5 * 255, 0, 255).astype(np.uint8)
+            _slow_rsz  = cv2.resize(_slow_norm, (sw, sh), interpolation=cv2.INTER_NEAREST)
+            _slow_ov   = cv2.cvtColor(_slow_rsz, cv2.COLOR_GRAY2BGR)
+            _slow_zero = cv2.resize(
+                (self._robot_heatmap_slow == 0).astype(np.uint8), (sw, sh), interpolation=cv2.INTER_NEAREST)
+            _slow_ov[_slow_zero > 0] = (0, 0, 0)
+            composite[sh:2*sh, mw+sw*2:mw+sw*3] = cv2.addWeighted(
+                composite[sh:2*sh, mw+sw*2:mw+sw*3], 1.0, _slow_ov, 0.30, 0)
+
         # Package targets sub-view: arrows on blank canvas, target dots stamped on top
         sub_scale = sw // self.warehouse_res[0]  # 2
         pkg_tgt_img = np.zeros((sh, sw, 3), dtype=np.uint8)
@@ -330,13 +338,13 @@ class MainGame:
         pkg_tgt_img[tgt_resized > 0] = (255, 255, 255)
         composite[sh:2*sh, mw+sw:mw+2*sw] = pkg_tgt_img
 
-        # ── Slot (row 1, col 3) — tabbed panel: DEADLINES (tab 0) / FLEET BATT (tab 1) ──
-        # The bottom _SV_TAB_H rows of the panel are reserved for the tab selector strip;
-        # both tabs must keep content above that boundary.
-        _SV_TAB_H = 10
-        _sv_tab_13 = self._sv_tabs.get((1, 3), 0)
+        # ── Slot (row 1, col 3): DEADLINES (top) + FLEET BATT (bottom) ──────────────────
+        # Panel is 160×140 px: top 70 px → deadline urgency histogram,
+        # 1 px separator, bottom 69 px → fleet battery bar chart.
+        _DL_H = 70
+        _FB_H = sh - _DL_H - 1   # 69 px
 
-        # ── Tab 0: Deadlines histogram ────────────────────────────────
+        # ── DEADLINES histogram (top _DL_H rows) ─────────────────────────────
         # 5-band urgency histogram across all live packages.
         # Bars are scaled relative to the tallest band so the chart is
         # always readable regardless of total package count.
@@ -347,6 +355,7 @@ class MainGame:
             ("NRML",  ( 80, 190,  80)),   # < 30 min        — green
             ("CMFT",  ( 80, 190, 140)),   # ≥ 30 min        — teal
         ]
+        _dl_n      = len(_dl_bands)
         _dl_counts = [0, 0, 0, 0, 0]
         for _p in wh.packages:
             _td_s = _p.timeToDeadline.total_seconds()
@@ -357,15 +366,13 @@ class MainGame:
             else:              _dl_counts[4] += 1
         _dl_total_pkg  = max(sum(_dl_counts), 1)
         _dl_max_cnt    = max(_dl_counts) if wh.packages else 1
-        _dl_img        = np.zeros((sh, sw, 3), dtype=np.uint8)
+        _dl_img        = np.zeros((_DL_H, sw, 3), dtype=np.uint8)
         _dl_font       = cv2.FONT_HERSHEY_SIMPLEX
-        _dl_n          = len(_dl_bands)
         _dl_pad        = 4
         _dl_bar_w      = (sw - _dl_pad * (_dl_n + 1)) // _dl_n   # ~26 px
         _dl_label_h    = 22   # bottom area: band name + pct (2 rows)
         _dl_bar_y_top  = 14   # leave room for the title overlay
-        # Reserve _SV_TAB_H px at bottom for the shared tab strip
-        _dl_bar_y_bot  = sh - _SV_TAB_H - _dl_label_h - 2
+        _dl_bar_y_bot  = _DL_H - _dl_label_h - 2
         _dl_chart_h    = _dl_bar_y_bot - _dl_bar_y_top
         for _bi, ((_dl_lbl, _dl_col), _dl_cnt) in enumerate(zip(_dl_bands, _dl_counts)):
             _dl_bx = _dl_pad + _bi * (_dl_bar_w + _dl_pad)
@@ -397,24 +404,28 @@ class MainGame:
             (_lw2, _), _ = cv2.getTextSize(_dl_lbl, _dl_font, 0.22, 1)
             _dl_lbl_col = _dl_col if _dl_cnt > 0 else (75, 75, 75)
             cv2.putText(_dl_img, _dl_lbl,
-                        (_dl_bx + (_dl_bar_w - _lw2) // 2, sh - _SV_TAB_H - _dl_label_h + 10),
+                        (_dl_bx + (_dl_bar_w - _lw2) // 2, _DL_H - _dl_label_h + 10),
                         _dl_font, 0.22, _dl_lbl_col, 1)
             # pct of total
             _dl_pct_s = "{:.0f}%".format(_dl_cnt / _dl_total_pkg * 100)
             (_pw2, _), _ = cv2.getTextSize(_dl_pct_s, _dl_font, 0.20, 1)
             cv2.putText(_dl_img, _dl_pct_s,
-                        (_dl_bx + (_dl_bar_w - _pw2) // 2, sh - _SV_TAB_H - 3),
+                        (_dl_bx + (_dl_bar_w - _pw2) // 2, _DL_H - 3),
                         _dl_font, 0.20, (90, 90, 90), 1)
 
-        # ── Tab 1: Fleet Battery bars ──────────────────────────────────
+        composite[0:_DL_H, mw+sw*3:mw+sw*4] = _dl_img
+
+        # 1 px separator between DEADLINES and FLEET BATT
+        composite[_DL_H, mw+sw*3:mw+sw*4] = (45, 45, 45)
+
+        # ── FLEET BATT bar chart (bottom _FB_H rows) ─────────────────────────────
         # One horizontal bar per robot, sorted ascending by battery %.  Green
         # (high) → yellow (mid) → red (low).  Gives an immediate fleet-wide
         # battery picture that the single avg:XX% stat cannot.
-        _fb_img   = np.zeros((sh, sw, 3), dtype=np.uint8)
+        _fb_img   = np.zeros((_FB_H, sw, 3), dtype=np.uint8)
         _fb_font  = cv2.FONT_HERSHEY_SIMPLEX
-        _fb_title_h = 14          # px reserved at top for title overlay
-        _fb_chart_top = _fb_title_h
-        _fb_chart_bot = sh - _SV_TAB_H   # stop before tab strip
+        _fb_chart_top = 14        # px reserved at top for title overlay
+        _fb_chart_bot = _FB_H
         _fb_chart_h   = _fb_chart_bot - _fb_chart_top
         _fb_bar_max_w = sw - 22   # right margin for optional % label on full bars
         robots_sorted_batt = sorted(wh.robots, key=lambda r: r.batteryPercent)
@@ -438,47 +449,60 @@ class MainGame:
                 else:
                     _fb_col = (50, 50, 200)    # red
                 cv2.rectangle(_fb_img, (0, _fb_y0), (_fb_fill_w, _fb_y1 - 1), _fb_col, -1)
-                # Charging indicator: cyan left-edge pip
+                # ── Right-edge status indicators ──
+                # Small coloured marker on the right side of each bar to show
+                # the robot's power/activity state at a glance.
+                _fb_ind_x = sw - 18          # right margin area
+                _fb_mid_y = (_fb_y0 + _fb_y1) // 2
+                _fb_bar_h = max(_fb_y1 - _fb_y0, 1)
                 if _fr.status == 'charging':
-                    cv2.rectangle(_fb_img, (0, _fb_y0), (2, _fb_y1 - 1), (200, 200, 50), -1)
+                    # Solid cyan pip — actively docked and charging
+                    _pip_half = max(_fb_bar_h // 2 - 1, 1)
+                    cv2.rectangle(_fb_img, (_fb_ind_x, _fb_mid_y - _pip_half),
+                                  (_fb_ind_x + 6, _fb_mid_y + _pip_half), (200, 200, 50), -1)
+                elif _fr.status == 'move to charging station':
+                    # Hollow cyan pip — en route to charger
+                    _pip_half = max(_fb_bar_h // 2 - 1, 1)
+                    cv2.rectangle(_fb_img, (_fb_ind_x, _fb_mid_y - _pip_half),
+                                  (_fb_ind_x + 6, _fb_mid_y + _pip_half), (200, 200, 50), 1)
+                elif _fr.batteryPercent < 10:
+                    # Orange pip — battery saving mode
+                    _pip_half = max(_fb_bar_h // 2 - 1, 1)
+                    cv2.rectangle(_fb_img, (_fb_ind_x, _fb_mid_y - _pip_half),
+                                  (_fb_ind_x + 6, _fb_mid_y + _pip_half), (0, 140, 255), -1)
+                elif _fr.carrying != -1:
+                    # Small white pip — carrying a package (higher drain)
+                    _pip_half = max(_fb_bar_h // 2 - 1, 1)
+                    cv2.rectangle(_fb_img, (_fb_ind_x, _fb_mid_y - _pip_half),
+                                  (_fb_ind_x + 6, _fb_mid_y + _pip_half), (180, 180, 180), -1)
         else:
             # No robots yet — placeholder message
-            cv2.putText(_fb_img, "no robots", (8, sh // 2), _fb_font, 0.32, (60, 60, 60), 1)
+            cv2.putText(_fb_img, "no robots", (8, _FB_H // 2), _fb_font, 0.32, (60, 60, 60), 1)
 
-        # Place the active tab's image onto composite
-        _slot13_img = _dl_img if _sv_tab_13 == 0 else _fb_img
-        composite[sh:2*sh, mw+sw*3:mw+sw*4] = _slot13_img
+        # Charge threshold line — vertical dashed line at dynamic threshold across full chart height.
+        # Threshold adapts to charger pressure (25%-50%). Any bar below = robot seeking charger.
+        _fb_dyn_thresh = getattr(self.warehouse, '_charge_threshold', 30)
+        _fb_thresh_x = int(_fb_dyn_thresh / 100.0 * _fb_bar_max_w)
+        for _dy in range(_fb_chart_top, _FB_H, 3):
+            cv2.line(_fb_img, (_fb_thresh_x, _dy), (_fb_thresh_x, min(_dy + 1, _FB_H - 1)), (60, 60, 180), 1)
 
-        # ── Tab selector strip (bottom of slot (1,3)) ─────────────────
-        # Two equal-width buttons labelled "DEAD" and "BATT"; active tab
-        # gets an accent underline and brighter text.  Matches the visual
-        # language of the zone-button strip on the zone map.
-        _tab_labels     = ["DEAD", "BATT"]
-        _n_tabs_13      = len(_tab_labels)
-        _tab_strip_y0   = sh * 2 - _SV_TAB_H
-        _tab_strip_x0   = mw + sw * 3
-        _tab_strip_w    = sw
-        composite[_tab_strip_y0:sh * 2, _tab_strip_x0:_tab_strip_x0 + _tab_strip_w] = (18, 18, 18)
-        composite[_tab_strip_y0, _tab_strip_x0:_tab_strip_x0 + _tab_strip_w] = (48, 48, 48)
-        _tab_font = cv2.FONT_HERSHEY_SIMPLEX
-        for _ti, _tlbl in enumerate(_tab_labels):
-            _tx0 = _tab_strip_x0 + _ti * _tab_strip_w // _n_tabs_13
-            _tx1 = _tab_strip_x0 + (_ti + 1) * _tab_strip_w // _n_tabs_13
-            _t_active = (_ti == _sv_tab_13)
-            if _t_active:
-                # Accent colour underline (top 2px of strip)
-                composite[_tab_strip_y0:_tab_strip_y0 + 2, _tx0:_tx1] = (140, 100, 60)
-                # Dim highlight background
-                composite[_tab_strip_y0 + 2:sh * 2, _tx0:_tx1] = (28, 24, 20)
-                _t_col = (190, 150, 100)
-            else:
-                _t_col = (65, 65, 65)
-            if _ti < _n_tabs_13 - 1:
-                composite[_tab_strip_y0:sh * 2, _tx1 - 1:_tx1] = (36, 36, 36)
-            (_tlw, _tlh), _ = cv2.getTextSize(_tlbl, _tab_font, 0.22, 1)
-            _ttx = _tx0 + (_tx1 - _tx0 - _tlw) // 2
-            _tty = _tab_strip_y0 + (_SV_TAB_H + _tlh) // 2
-            cv2.putText(composite, _tlbl, (_ttx, _tty), _tab_font, 0.22, _t_col, 1)
+        # Mini legend in title row (right side): coloured squares + 1-char labels
+        _lg_y = 4
+        _lg_items = [
+            ((200, 200, 50), True,  'C'),   # Charging (filled cyan)
+            ((200, 200, 50), False, 'E'),   # En-route (hollow cyan)
+            ((0, 140, 255),  True,  'S'),   # Saving mode (orange)
+            ((180, 180, 180), True, 'P'),   # Package (white)
+        ]
+        _lg_x = sw - 8 * len(_lg_items) - 2
+        for _lg_col, _lg_fill, _lg_ch in _lg_items:
+            cv2.rectangle(_fb_img, (_lg_x, _lg_y), (_lg_x + 4, _lg_y + 4),
+                          _lg_col, -1 if _lg_fill else 1)
+            cv2.putText(_fb_img, _lg_ch, (_lg_x, _lg_y + 10),
+                        _fb_font, 0.2, (120, 120, 120), 1)
+            _lg_x += 8
+
+        composite[_DL_H+1:sh, mw+sw*3:mw+sw*4] = _fb_img
 
         # Zone map (top-right) — reserve BUTTON_H at bottom and BRUSH_W on right
         _btn_h   = self.paint_handler.BUTTON_H
@@ -547,18 +571,16 @@ class MainGame:
         _tfont = cv2.FONT_HERSHEY_SIMPLEX
         _tcol  = (145, 145, 145)
         _zonemap_title   = "ZONE MAP util%" if _util_overlay_active else "ZONE MAP"
-        _slot13_titles   = ["DEADLINES", "FLEET BATT"]
-        _slot13_title    = _slot13_titles[self._sv_tabs.get((1, 3), 0)]
         _titles = [
             ("WAREHOUSE",    4,            4),
             ("CHARGERS",     mw + 4,       4),
             ("PACKAGES",     mw+sw+4,      4),
             ("ROBOTS",       mw + 4,       sh + 4),
             ("PKG TARGETS",  mw+sw+4,      sh + 4),
-            ("TRAFFIC",      mw+sw*2+4,    sh + 4),
+            ("TRAFFIC HEATMAP", mw+sw*2+4, sh + 4),
             (_zonemap_title, mw+sw*2+4,    4),
-            ("SIM STATS",    mw+sw*3+4,    4),
-            (_slot13_title,  mw+sw*3+4,    sh + 4),
+            ("DEADLINES",    mw+sw*3+4,    4),
+            ("FLEET BATT",   mw+sw*3+4,    74),
         ]
         for _ttxt, _tx, _ty in _titles:
             cv2.putText(composite, _ttxt, (_tx, _ty + 8), _tfont, 0.28, _tcol, 1)
@@ -584,13 +606,7 @@ class MainGame:
             cv2.rectangle(composite, (4, _ly - 7), (12, _ly - 1), _bright, -1)
             cv2.putText(composite, _zlbl, (15, _ly), _zfont, 0.32, (200, 200, 200), 1)
 
-        # Bottom-right sub-view: sim stats
-        stats_img = np.zeros((sh, sw, 3), dtype=np.uint8)
-        sfont = cv2.FONT_HERSHEY_SIMPLEX
-        sfs   = 0.28
-        scol  = (145, 145, 145)
-        swhite = (200, 200, 200)
-
+        # SIM STATS data (rendered in info panel below)
         now_t = time.time()
         r = self._rate_stats  # may be empty dict at startup
         _n = self._n
@@ -643,50 +659,28 @@ class MainGame:
             ("exported", "{} ({})".format(_n(wh.packageExportRollingCount), _r("export")), None),
             ("pkgs",     "{}/{} ({})".format(_n(wh.packagesInWarehouseCount), _n(wh.packagesMaxQuantity), _r("pkgs")), None),
             ("robots",   "idle:{}/{} b:{}%".format(_idle_r, len(wh.robots), _avg_b), None),
-            ("util",     _util_str, _util_col),
-            ("opt",      _opt_str,  _opt_col),
             ("import",   "{}/{} ({})".format(_n(wh.packagesInImportCount),  _n(wh.numberOfImportSlots),  _r("import")), None),
             ("storage",  "{}/{} ({})".format(_n(wh.packagesInStorageCount), _n(wh.numberOfStorageSlots), _r("storage")), None),
             ("export",   "{}/{} ({})".format(_n(wh.packagesInExportCount),  _n(wh.numberOfExportSlots),  _r("expzone")), None),
-            ("newest",   young_pkg, None),
+            ("util",     _util_str, _util_col),
+            ("opt",      _opt_str,  _opt_col),
         ]
-        lbl_x = 4
-        val_x = 48
-        for si, (lbl, val, vcol) in enumerate(stats_lines):
-            sy2 = 22 + si * 11
-            if sy2 > sh - 4:
-                break
-            cv2.putText(stats_img, lbl + ":", (lbl_x, sy2), sfont, sfs, scol, 1)
-            max_val_w = sw - val_x - 2
-            def _fits(s):
-                (w2, _), _ = cv2.getTextSize(s, sfont, sfs, 1)
-                return w2 <= max_val_w
-            # Cascade: full → drop rate suffix → char-trim with ellipsis
-            if not _fits(val):
-                # Try stripping trailing ( ... ) rate annotation
-                paren = val.rfind(" (")
-                if paren != -1:
-                    val = val[:paren]
-            if not _fits(val):
-                # Last resort: trim characters and append ellipsis
-                while len(val) > 1:
-                    val = val[:-1]
-                    if _fits(val + "\u2026"):
-                        val = val + "\u2026"
-                        break
-            cv2.putText(stats_img, val, (val_x, sy2), sfont, sfs, vcol or swhite, 1)
-        composite[0:sh, mw+sw*3:mw+sw*4] = stats_img
+        # (SIM STATS rendering moved to info panel column 3)
 
-        # Info panel
+        # ═══════════════════════ INFO PANEL ═══════════════════════
+        # 960×165px area below the main view (y = mh..mh+ph = 280..445)
+        # 4 columns of 240px: ROBOTS | CHARGERS | SIM STATS | PACKAGES
         composite[mh, :] = 60  # thin separator line
         font  = cv2.FONT_HERSHEY_SIMPLEX
-        fs    = 0.36
+        fs    = 0.26
         ft    = 1
-        lh    = 14
-        pad_x = 6
-        col_w = cw // 3
+        lh    = 10
+        pad_x = 4
+        col_w = cw // 4
         white = (220, 220, 220)
-        gray  = (150, 150, 150)
+        gray  = (140, 140, 140)
+        dim   = (85, 85, 85)
+        sec_col = (95, 95, 95)     # section-separator label colour
 
         def put(text, x, y, col, max_x=None):
             nonlocal composite
@@ -704,122 +698,260 @@ class MainGame:
             (tw, _), _ = cv2.getTextSize(text, font, fs, ft)
             return x + tw
 
+        # ── Pixel geometry ──
+        _hdr_y      = mh + 10           # header text baseline
+        _underline  = mh + 11           # underline row
+        _data_start = mh + 22           # first data row baseline (gap avoids overlap)
+        _split      = 7                 # rows in each section
+        _div_y      = _data_start + _split * lh - lh // 2  # horizontal divider
+
+        # Column dividers (no underline — mh separator is enough)
+        composite[mh:mh + ph, col_w]     = 40
+        composite[mh:mh + ph, col_w * 2] = 40
+        composite[mh:mh + ph, col_w * 3] = 40
+
+        # ── Lookup tables ──
         robot_priority = {"drop off target package": 0, "pick up target package": 1,
                           "move to target dropoff location": 2, "move to target pickup location": 3,
                           "move to charging station": 4, "charging": 5, "idle": 6}
-        sorted_robots_active = sorted(self.warehouse.robots, key=lambda r: robot_priority.get(r.status, 7))[:7]
-        sorted_robots_batt   = sorted(self.warehouse.robots, key=lambda r: r.batteryPercent)[:3]
-
+        robot_short = {
+            "drop off target package":         "DROPOFF",
+            "pick up target package":          "PICKUP",
+            "move to target dropoff location": ">>DROP",
+            "move to target pickup location":  ">>PICK",
+            "move to charging station":        ">>CHRG",
+            "charging":                        "CHARGING",
+            "idle":                            "IDLE",
+        }
+        robot_col_map = {
+            "DROPOFF": (60, 180, 255), "PICKUP": (60, 180, 255),
+            ">>DROP": (80, 220, 150), ">>PICK": (80, 220, 150),
+            ">>CHRG": (50, 200, 200), "CHARGING": (50, 200, 200),
+            "IDLE": (75,  75,  75),
+        }
+        pkg_short = {"idle": "idle", "move planned": "planned", "carried": "carried", "error": "ERROR"}
+        zone_col = {"import": (200, 160, 80), "storage": (80, 180, 200), "export": (80, 120, 220)}
         charger_priority = {"charging": 0, "charging planned": 1, "idle": 2}
-        sorted_chargers = sorted(self.warehouse.chargers, key=lambda c: charger_priority.get(c.status, 3))[:10]
-
-        sorted_packages = sorted(self.warehouse.packages, key=lambda p: p.timeToDeadline)[:10]
-
-        # Headers with live entity counts / max
-        put("ROBOTS ({})".format(len(self.warehouse.robots)),                                          pad_x,             mh + lh + 2, white)
-        put("CHARGERS ({})".format(len(self.warehouse.chargers)),                                      col_w + pad_x,     mh + lh + 2, white)
-        put("PACKAGES ({}/{})".format(len(self.warehouse.packages), self.warehouse.packagesMaxQuantity), col_w * 2 + pad_x, mh + lh + 2, white)
-        composite[mh + lh + 5:mh + lh + 6, :] = 45   # underline below column headers
-        composite[mh:, col_w]     = 40
-        composite[mh:, col_w * 2] = 40
-
-        robot_status_short = {
-            "drop off target package":         "dropoff",
-            "pick up target package":          "pickup",
-            "move to target dropoff location": "->dropoff",
-            "move to target pickup location":  "->pickup",
-            "move to charging station":        "->charger",
-            "charging":                        "charging",
-            "idle":                            "idle",
-        }
-        pkg_status_short = {
-            "idle": "idle", "move planned": "planned",
-            "carried": "carried", "error": "ERR",
-        }
-        robot_action_col = {
-            "dropoff":   (60, 180, 255),   # orange  – delivering
-            "pickup":    (60, 180, 255),   # orange  – picking up
-            "->dropoff": (80, 220, 150),   # lime    – in transit
-            "->pickup":  (80, 220, 150),   # lime    – in transit
-            "->charger": (50, 200, 200),   # yellow  – battery concern
-            "charging":  (50, 200, 200),   # yellow
-            "idle":      (90,  90,  90),   # dim
-        }
-        zone_col = {
-            "import":  (200, 160,  80),    # warm blue
-            "storage": ( 80, 180, 200),    # amber
-            "export":  ( 80, 120, 220),    # orange-red (base; overridden per package)
-        }
 
         def batt_col(pct):
-            if pct > 50: return ( 80, 190,  80)   # green
-            if pct > 20: return ( 50, 200, 200)   # yellow
-            return              ( 80,  80, 200)   # red
+            if pct > 50: return (80, 190, 80)
+            if pct > 20: return (50, 200, 200)
+            return (80, 80, 200)
 
-        def charger_status_col(c):
-            if c.status == "charging":         return (130, 235, 235)   # bright teal
-            if c.status == "charging planned": return ( 65, 145, 145)   # mid teal
-            return                                    ( 45,  90,  90)   # dim teal – idle
+        def chg_col(c):
+            if c.status == "charging":         return (130, 235, 235)
+            if c.status == "charging planned": return (65, 145, 145)
+            return (45, 90, 90)
 
-        def pkg_deadline_col(td):
-            if td < 0:   return ( 80,  80, 210)   # red   – overdue
-            if td < 60:  return ( 70, 130, 230)   # orange
-            if td < 300: return ( 50, 200, 200)   # yellow
+        def dl_col(td):
+            if td < 0:   return (80, 80, 210)
+            if td < 60:  return (70, 130, 230)
+            if td < 300: return (50, 200, 200)
             return gray
 
-        def draw_robot_row(x, y, r, id_col):
-            batt  = int(r.batteryPercent)
-            short = robot_status_short.get(r.status, r.status[:9])
-            x = put("R{} ".format(r.robotNumber), x, y, id_col)
-            x = put("{} ".format(short), x, y, robot_action_col.get(short, gray))
+        now_t = time.time()
+
+        # ────────────── ROBOTS ──────────────
+        _nr = len(self.warehouse.robots)
+        x = put("ROBOTS ({})  ".format(_nr), pad_x, _hdr_y, white)
+        put("status | battery", x, _hdr_y, sec_col)
+
+        # Top 7: by task priority (busiest first)
+        _robots_by_status = sorted(self.warehouse.robots, key=lambda r: robot_priority.get(r.status, 7))
+        for ri in range(min(_split, len(_robots_by_status))):
+            r = _robots_by_status[ri]
+            y = _data_start + ri * lh
+            if y >= mh + ph - 2: break
+            sh_s = robot_short.get(r.status, r.status[:4].upper())
+            x = pad_x
+            x = put("R{} ".format(r.robotNumber), x, y, gray)
+            x = put("{} ".format(sh_s), x, y, robot_col_map.get(sh_s, gray))
             if r.carrying != -1:
-                x = put("[P{}] ".format(_n(r.carrying)), x, y, (80, 160, 220))
-            put("{}%".format(batt), x, y, batt_col(batt), max_x=col_w)
+                x = put("P{} ".format(_n(r.carrying)), x, y, (80, 160, 220))
+            batt = int(r.batteryPercent)
+            x = put("{}% ".format(batt), x, y, batt_col(batt))
+            # Zone
+            _rzone = r.area[:4] if r.area else "?"
+            _rtgt = r.areaTarget[:4] if r.areaTarget and r.areaTarget != r.area else ""
+            if _rtgt:
+                x = put("{}>{}  ".format(_rzone, _rtgt), x, y, zone_col.get(r.area, dim))
+            else:
+                x = put("{}  ".format(_rzone), x, y, zone_col.get(r.area, dim))
+            age = now_t - r.createdAt
+            put(self._fmt_age(int(age)), x, y, dim, max_x=col_w)
 
-        # Divider between top-7 active and top-3 lowest-battery rows
-        sep_y = mh + lh + 2 + 7 * lh + lh // 2
-        composite[sep_y:sep_y + 1, 0:col_w] = 50
+        # Divider
+        composite[_div_y:_div_y + 1, 0:col_w] = 40
 
-        for i in range(10):
-            y = mh + lh + 2 + (i + 1) * lh
+        # Bottom 7: by lowest battery
+        _robots_by_batt = sorted(self.warehouse.robots, key=lambda r: r.batteryPercent)
+        for bi in range(min(_split, len(_robots_by_batt))):
+            r = _robots_by_batt[bi]
+            y = _div_y + 8 + bi * lh
+            if y >= mh + ph - 2: break
+            sh_s = robot_short.get(r.status, r.status[:4].upper())
+            x = pad_x
+            x = put("R{} ".format(r.robotNumber), x, y, (60, 200, 200))
+            batt = int(r.batteryPercent)
+            x = put("{}% ".format(batt), x, y, batt_col(batt))
+            drn = r.batteryDepletingRate * r.batteryDrainMultiplier
+            x = put("drain:{:.2f} ".format(drn), x, y, dim)
+            x = put("{} ".format(sh_s), x, y, robot_col_map.get(sh_s, gray))
+            if r.carrying != -1:
+                x = put("P{} ".format(_n(r.carrying)), x, y, (80, 160, 220))
+            _rzone = r.area[:4] if r.area else "?"
+            put("{}".format(_rzone), x, y, zone_col.get(r.area, dim), max_x=col_w)
+
+        # ────────────── CHARGERS ──────────────
+        _nc = len(self.warehouse.chargers)
+        _n_busy = sum(1 for c in self.warehouse.chargers if c.status != 'idle')
+        x = put("CHARGERS ({})  ".format(_nc), col_w + pad_x, _hdr_y, white)
+        put("status | fleet", x, _hdr_y, sec_col)
+
+        # Charger→robot object mapping for battery display
+        _crmap_obj = {}
+        for _cr in self.warehouse.robots:
+            for _ct in _cr.actionQueue:
+                if _ct[1] in ("move to charging station", "charging"):
+                    _crmap_obj[tuple(_ct[0])] = _cr
+
+        # Top section: all chargers sorted by status
+        _chargers_sorted = sorted(self.warehouse.chargers, key=lambda c: charger_priority.get(c.status, 3))
+        for ci in range(min(_split, len(_chargers_sorted))):
+            c = _chargers_sorted[ci]
+            y = _data_start + ci * lh
+            if y >= mh + ph - 2: break
+            x = col_w + pad_x
+            x = put("C{} ".format(c.chargerNumber), x, y, tuple(c.colour))
+            _st = c.status
+            if _st == "charging":
+                x = put("CHARGING ", x, y, chg_col(c))
+            elif _st == "charging planned":
+                x = put("PLANNED  ", x, y, chg_col(c))
+            else:
+                x = put("IDLE     ", x, y, chg_col(c))
+            _rob_obj = _crmap_obj.get(tuple(c.xyLocation))
+            if _rob_obj is not None:
+                x = put("R{} ".format(_rob_obj.robotNumber), x, y, (80, 220, 150))
+                _rb = int(_rob_obj.batteryPercent)
+                put("{}%".format(_rb), x, y, batt_col(_rb), max_x=col_w * 2)
+
+        # If chargers don't fill 7 rows, show remaining chargers beyond 7
+        for ci2 in range(_split, min(len(_chargers_sorted), _split * 2)):
+            c = _chargers_sorted[ci2]
+            y = _data_start + ci2 * lh
+            if y >= _div_y: break
+            x = col_w + pad_x
+            x = put("C{} ".format(c.chargerNumber), x, y, tuple(c.colour))
+            _st = c.status
+            if _st == "charging":
+                x = put("CHARGING ", x, y, chg_col(c))
+            elif _st == "charging planned":
+                x = put("PLANNED  ", x, y, chg_col(c))
+            else:
+                x = put("IDLE     ", x, y, chg_col(c))
+            _rob_obj = _crmap_obj.get(tuple(c.xyLocation))
+            if _rob_obj is not None:
+                x = put("R{} ".format(_rob_obj.robotNumber), x, y, (80, 220, 150))
+                _rb = int(_rob_obj.batteryPercent)
+                put("{}%".format(_rb), x, y, batt_col(_rb), max_x=col_w * 2)
+
+        # Divider
+        composite[_div_y:_div_y + 1, col_w:col_w * 2] = 40
+
+        # Bottom section: fleet & power summary
+        _avg_batt  = sum(r.batteryPercent for r in self.warehouse.robots) / max(_nr, 1)
+        _pressure  = getattr(self.warehouse, '_charger_pressure', 0.0)
+        _threshold = getattr(self.warehouse, '_charge_threshold', 30)
+        _n_idle_r   = sum(1 for r in self.warehouse.robots if r.status == 'idle')
+        _n_chrging  = sum(1 for r in self.warehouse.robots if r.status == 'charging')
+        _n_enroute  = sum(1 for r in self.warehouse.robots if r.status == 'move to charging station')
+        _n_working  = _nr - _n_idle_r - _n_chrging - _n_enroute
+        _avg_drain  = sum(r.batteryDepletingRate * r.batteryDrainMultiplier for r in self.warehouse.robots) / max(_nr, 1)
+
+        _fleet_lines = [
+            ("avg batt",   "{:.0f}%".format(_avg_batt),     batt_col(int(_avg_batt))),
+            ("avg drain",  "{:.3f}/t".format(_avg_drain),    dim),
+            ("pressure",   "{:.0f}%".format(_pressure * 100), (50, 200, 200) if _pressure > 0.5 else gray),
+            ("threshold",  "{:.0f}%".format(_threshold),     gray),
+            ("working",    str(_n_working),                  (80, 220, 150)),
+            ("charging",   "{} + {} en-rt".format(_n_chrging, _n_enroute), (50, 200, 200)),
+            ("idle",       str(_n_idle_r),                   (75, 75, 75)),
+        ]
+        for fi, (fl, fv, fc) in enumerate(_fleet_lines):
+            y = _div_y + 8 + fi * lh
+            if y >= mh + ph - 2: break
+            x = col_w + pad_x
+            x = put("{}: ".format(fl), x, y, sec_col)
+            put(fv, x, y, fc, max_x=col_w * 2)
+
+        # ────────────── SIM STATS ──────────────
+        _sc2 = col_w * 2
+        _sc3 = col_w * 3
+        x = put("SIM STATS  ", _sc2 + pad_x, _hdr_y, white)
+        put("overview", x, _hdr_y, sec_col)
+        _swhite = (200, 200, 200)
+        _sdim   = (95, 95, 95)
+        _s_val_x = _sc2 + 52  # label : value offset
+        for si, (lbl, val, vcol) in enumerate(stats_lines):
+            y = _data_start + si * lh
             if y >= mh + ph - 2:
                 break
+            put(lbl + ":", _sc2 + pad_x, y, _sdim)
+            put(val, _s_val_x, y, vcol or _swhite, max_x=_sc3)
 
-            if i < 7:
-                if i < len(sorted_robots_active):
-                    draw_robot_row(pad_x, y, sorted_robots_active[i], gray)
-            else:
-                bi = i - 7
-                if bi < len(sorted_robots_batt):
-                    draw_robot_row(pad_x, y, sorted_robots_batt[bi], (60, 200, 200))
+        # ────────────── PACKAGES ──────────────
+        _np = len(self.warehouse.packages)
+        _nm = self.warehouse.packagesMaxQuantity
+        x = put("PKGS ({}/{})  ".format(_np, _nm), col_w * 3 + pad_x, _hdr_y, white)
+        put("by deadline", x, _hdr_y, sec_col)
 
-            if i < len(sorted_chargers):
-                c = sorted_chargers[i]
-                x = col_w + pad_x
-                x = put("C{} ".format(c.chargerNumber), x, y, tuple(c.colour))
-                put(c.status, x, y, charger_status_col(c), max_x=col_w * 2)
+        def _draw_pkg(x_start, y, p, max_end):
+            td = p.timeToDeadline.total_seconds()
+            dl_str = "LATE" if td < 0 else self._fmt_age(int(td))
+            age = now_t - p.createdAt
+            age_str = self._fmt_age(int(age))
+            tgt = p.areaTarget if p.areaTarget not in ("none", "") else ""
+            st = pkg_short.get(p.status, p.status[:3])
+            x = x_start
+            # ID
+            x = put("P{} ".format(_n(p.packageNumber)), x, y, tuple(p.colour))
+            # Deadline + Age
+            x = put("{} ".format(dl_str), x, y, dl_col(td))
+            x = put("{} ".format(age_str), x, y, (200, 160, 80))
+            # Zone > target
+            x = put("{} ".format(p.area[:4]), x, y, zone_col.get(p.area, gray))
+            if tgt:
+                x = put(">{} ".format(tgt[:4]), x, y, zone_col.get(tgt, gray))
+            # Carrier / status
+            if p.carrier != -1:
+                x = put("R{} ".format(p.carrier), x, y, (80, 160, 220))
+            x = put("{} ".format(st), x, y, dim)
+            # Weight
+            _wt = getattr(p.itemValues, 'weight', None) if p.itemValues else None
+            if _wt:
+                x = put("{}kg ".format(_wt), x, y, (140, 140, 100))
+            # Item name
+            _iname = getattr(p.itemValues, 'name', '') if p.itemValues else ''
+            if _iname:
+                x = put("{} ".format(_iname), x, y, (120, 140, 120), max_x=max_end)
+            # Destination city (fills remaining space)
+            _city = getattr(p.addressTo, 'city', '') if hasattr(p, 'addressTo') and p.addressTo else ''
+            if _city and x < max_end - 10:
+                put(_city, x, y, (110, 110, 130), max_x=max_end)
 
-            if i < len(sorted_packages):
-                p = sorted_packages[i]
-                td = p.timeToDeadline.total_seconds()
-                if td < 0:
-                    td_str = "LATE "
-                else:
-                    td_str = self._fmt_age(int(td)) + " "
-                tgt    = p.areaTarget if p.areaTarget not in ("none", "") else ""
-                arrow  = "->{} ".format(tgt[:4]) if tgt else " "
-                st_str = "[{}]".format(pkg_status_short.get(p.status, p.status[:6]))
-                x = col_w * 2 + pad_x
-                x = put("P{} ".format(_n(p.packageNumber)), x, y, tuple(p.colour))
-                x = put(p.area[:4], x, y, zone_col.get(p.area, gray))
-                x = put(arrow, x, y, gray)
-                x = put(td_str, x, y, pkg_deadline_col(td))
-                put(st_str, x, y, gray, max_x=cw)
+        # All packages by deadline (most urgent first) — fills entire column
+        _pkgs_deadline = sorted(self.warehouse.packages, key=lambda p: p.timeToDeadline)
+        _max_pkg_rows = _split * 2 + 1  # use full column height
+        for pi in range(_max_pkg_rows):
+            if pi >= len(_pkgs_deadline): break
+            y = _data_start + pi * lh
+            if y >= mh + ph - 2: break
+            _draw_pkg(col_w * 3 + pad_x, y, _pkgs_deadline[pi], cw)
 
-        # Update rolling chart histories (sample once per second)
-        self._hist_tick += 1
-        if self._hist_tick >= self._hist_sample_every:
-            self._hist_tick = 0
+        # Update rolling chart histories (sample once per second via wall-clock)
+        if time.time() - self._hist_last_sample >= 1.0:
+            self._hist_last_sample = time.time()
             overdue = sum(1 for p in self.warehouse.packages if p.timeToDeadline.total_seconds() < 0)
             self._late_total += overdue   # accumulate: each 1-s sample adds current late count
             mean_batt = float(np.mean([r.batteryPercent for r in self.warehouse.robots])) if self.warehouse.robots else 0.0
@@ -835,6 +967,12 @@ class MainGame:
             self._hist_need_charge  = np.roll(self._hist_need_charge,  -1); self._hist_need_charge[-1]  = need_charge
             self._hist_charging     = np.roll(self._hist_charging,     -1); self._hist_charging[-1]     = charging
             self._hist_idle         = np.roll(self._hist_idle,         -1); self._hist_idle[-1]         = idle_count
+            # Flow control histories
+            self._hist_import_cap   = np.roll(self._hist_import_cap,   -1); self._hist_import_cap[-1]   = getattr(wh, '_flow_import_cap', wh.packagesMaxQuantity)
+            self._hist_throughput   = np.roll(self._hist_throughput,   -1); self._hist_throughput[-1]   = getattr(wh, '_flow_throughput', 0) * 60  # per minute for readability
+            self._hist_delivery     = np.roll(self._hist_delivery,     -1); self._hist_delivery[-1]     = getattr(wh, '_flow_avg_delivery', 0)
+            n_pkgs = max(len(wh.packages), 1)
+            self._hist_overdue_pct  = np.roll(self._hist_overdue_pct,  -1); self._hist_overdue_pct[-1]  = overdue / n_pkgs * 100
             self._hist_count    = min(self._hist_count + 1, len(self._hist_exported))
             # Rate-of-change: compare with previous snapshot
             wh = self.warehouse
@@ -865,13 +1003,13 @@ class MainGame:
         # Re-draw separators and column dividers last so they sit on top of chart content
         composite[mh, :]                         = 60
         composite[mh + ph, :]                    = 55
-        composite[mh + lh + 5 : mh + lh + 6, :] = 45
-        composite[mh:, col_w]                    = 40
-        composite[mh:, col_w * 2]                = 40
+        composite[mh:mh + ph, col_w]             = 40
+        composite[mh:mh + ph, col_w * 2]         = 40
+        composite[mh:mh + ph, col_w * 3]         = 40
 
         # ── Panel outlines ─────────────────────────────────────────────
         _oc  = (45, 45, 45)   # subtle dark-grey border colour
-        _cw3 = cw // 3        # chart column width (mirrors w3 in _draw_charts)
+        _cw4 = cw // 4        # chart column width (mirrors w4 in _draw_charts)
         def _outline(x0, y0, x1, y1):
             cv2.rectangle(composite, (x0, y0), (x1 - 1, y1 - 1), _oc, 1)
         # Top row: main view + 4 sub-views + zone map + stats
@@ -882,14 +1020,15 @@ class MainGame:
         _outline(mw + sw,    sh,  mw + sw * 2, sh * 2)       # package targets
         _outline(mw + sw*2,  0,   mw + sw * 3, sh)           # zone map
         _outline(mw + sw*2,  sh,  mw + sw * 3, sh * 2)       # traffic heatmap
-        _outline(mw + sw*3,  0,   mw + sw * 4, sh)            # sim stats
-        _outline(mw + sw*3,  sh,  mw + sw * 4, sh * 2)       # deadlines histogram
+        _outline(mw + sw*3,  0,   mw + sw * 4, sh)            # deadlines + fleet batt
+        _outline(mw + sw*3,  sh,  mw + sw * 4, sh * 2)       # (empty)
         # Info panel (one outline for the whole strip)
         _outline(0,           mh,       cw,           mh + ph)      # info panel
-        # Chart strip (three charts)
-        _outline(0,           mh + ph,  _cw3,         mh + ph + ch) # chart 1
-        _outline(_cw3,        mh + ph,  _cw3 * 2,     mh + ph + ch) # chart 2
-        _outline(_cw3 * 2,    mh + ph,  cw,            mh + ph + ch) # chart 3
+        # Chart strip (four charts)
+        _outline(0,           mh + ph,  _cw4,         mh + ph + ch) # chart 1
+        _outline(_cw4,        mh + ph,  _cw4 * 2,     mh + ph + ch) # chart 2
+        _outline(_cw4 * 2,    mh + ph,  _cw4 * 3,     mh + ph + ch) # chart 3
+        _outline(_cw4 * 3,    mh + ph,  cw,            mh + ph + ch) # chart 4
 
         # Zone-map panel controls (zone buttons at bottom, brush sizes on right)
         self.paint_handler.draw_buttons(composite, _zfont)
@@ -900,10 +1039,10 @@ class MainGame:
         return self
 
     def _draw_charts(self, canvas, y_off, ch, cw):
-        """Render three side-by-side charts into canvas starting at row y_off."""
+        """Render four side-by-side charts into canvas starting at row y_off."""
         font = cv2.FONT_HERSHEY_SIMPLEX
         _n   = self._n
-        w3   = cw // 3
+        w4   = cw // 4
         y0, y1 = y_off, y_off + ch
 
         # Rate helper (mirrors the one in gameDraw)
@@ -921,9 +1060,6 @@ class MainGame:
             appended to the value text beside each series label."""
             w, h = x1 - x0, y1 - y0
             arr = np.full((h, w, 3), (8, 8, 8), dtype=np.uint8)
-            arr[[0, -1], :] = (55, 55, 55)
-            arr[:, [0, -1]] = (55, 55, 55)
-            cv2.putText(arr, "{} ({})".format(title, span_lbl), (4, 11), font, 0.30, (145, 145, 145), 1)
             # Pre-compute shared range if requested
             s_min, s_rng = 0.0, 1.0
             if shared_scale:
@@ -932,6 +1068,38 @@ class MainGame:
                     s_min = float(min(np.min(v) for v in shared_views))
                     s_max = float(max(np.max(v) for v in shared_views))
                     s_rng = max(s_max - s_min, 1.0)
+            # --- Pass 1: draw chart lines first ---
+            for data, col, label in series:
+                view = data[-window:]
+                if fixed_scales and label in fixed_scales:
+                    dmin, dmax = fixed_scales[label]
+                    rng = max(float(dmax) - float(dmin), 1.0)
+                    dmin = float(dmin)
+                elif shared_scale and label in shared_scale:
+                    dmin, rng = s_min, s_rng
+                else:
+                    dmin = float(np.min(view))
+                    rng  = max(float(np.max(view)) - dmin, 1.0)
+                n  = len(view)
+                xs = np.linspace(1, w - 2, n).astype(int)
+                ys = np.clip(
+                    (h - 3 - ((view.astype(float) - dmin) / rng * (h - 8))).astype(int),
+                    1, h - 2)
+                for i in range(n - 1):
+                    cv2.line(arr, (int(xs[i]), int(ys[i])), (int(xs[i+1]), int(ys[i+1])), col, 1)
+            # --- Pass 2: per-line tight backdrop behind text, then draw text on top ---
+            def _backdrop(ty, txt, fs=0.3):
+                """Darken a tight rect behind a text line before drawing it."""
+                (tw, th), baseline = cv2.getTextSize(txt, font, fs, 1)
+                bx0 = max(2, 4 - 2)
+                by0 = max(1, ty - th - 1)
+                bx1 = min(w - 1, 4 + tw + 2)
+                by1 = min(h - 1, ty + baseline + 1)
+                roi = arr[by0:by1, bx0:bx1]
+                roi[:] = (roi.astype(np.int16) * 3 // 10).clip(0, 255).astype(np.uint8)
+            title_str = "{} ({})".format(title, span_lbl)
+            _backdrop(11, title_str, 0.30)
+            cv2.putText(arr, title_str, (4, 11), font, 0.30, (185, 185, 185), 1)
             label_y = 25
             for data, col, label in series:
                 view = data[-window:]
@@ -953,28 +1121,13 @@ class MainGame:
                             if lw <= max_lbl_w:
                                 val_str += "\u2026"
                                 break
+                _backdrop(label_y, val_str)
                 cv2.putText(arr, val_str, (4, label_y), font, 0.3, col, 1)
                 label_y += 10
-                if fixed_scales and label in fixed_scales:
-                    dmin, dmax = fixed_scales[label]
-                    rng = max(float(dmax) - float(dmin), 1.0)
-                    dmin = float(dmin)
-                elif shared_scale and label in shared_scale:
-                    dmin, rng = s_min, s_rng
-                else:
-                    dmin = float(np.min(view))
-                    rng  = max(float(np.max(view)) - dmin, 1.0)
-                n  = len(view)
-                xs = np.linspace(1, w - 2, n).astype(int)
-                ys = np.clip(
-                    (h - 3 - ((view.astype(float) - dmin) / rng * (h - 8))).astype(int),
-                    1, h - 2)
-                for i in range(n - 1):
-                    cv2.line(arr, (int(xs[i]), int(ys[i])), (int(xs[i+1]), int(ys[i+1])), col, 1)
             canvas[y0:y1, x0:x1] = arr
 
         # Chart 1: Imported/Exports/Tot Late share one y-scale; Overdue (instantaneous) on its own
-        mini_chart(0, w3, "Imports, Exports & Overdue",
+        mini_chart(0, w4, "Imports, Exports & Overdue",
                    [(self._hist_imported, ( 60, 200,  60), "Imported"),   # green  – matches import zone
                     (self._hist_exported, ( 60,  60, 200), "Exported"),   # red    – matches export zone
                     (self._hist_late,     ( 40, 160, 240), "Tot Late"),   # orange – cumulative overdue
@@ -982,12 +1135,20 @@ class MainGame:
                    shared_scale={"Imported", "Exported", "Tot Late"},
                    rates={"Imported": _r("tot_imp"), "Exported": _r("export"), "Tot Late": _r("tot_late"), "Overdue": _r("overdue")})
 
-        # Chart 2: Zone capacity fill bars
-        self._draw_zone_bars(canvas, w3, y0, w3 * 2, y1,
-                             zone_rates={"Import": _r("import"), "Storage": _r("storage"), "Export": _r("expzone")})
+        # Chart 2: Flow Control (adaptive import throttling)
+        mini_chart(w4, w4 * 2, "Flow Control",
+                   [(self._hist_import_cap,  ( 80, 190,  80), "Cap"),
+                    (self._hist_throughput,   (200, 180,  60), "Thr/m"),
+                    (self._hist_delivery,     ( 50, 160, 220), "Deliv"),
+                    (self._hist_overdue_pct,  ( 80,  80, 210), "Ovrd%")],
+                   fixed_scales={"Ovrd%": (0, 100)})
 
-        # Chart 3: Fleet — Batt% on fixed scale; Robots/NeedCharge/Charging/Idle share robot-count scale
-        mini_chart(w3 * 2, cw, "Fleet Health",
+        # Chart 3: Zone capacity fill bars
+        self._draw_zone_bars(canvas, w4 * 2, y0, w4 * 3, y1,
+                             zone_rates={"Imp": _r("import"), "Sto": _r("storage"), "Exp": _r("expzone")})
+
+        # Chart 4: Fleet — Batt% on fixed scale; Robots/NeedCharge/Charging/Idle share robot-count scale
+        mini_chart(w4 * 3, cw, "Fleet Health",
                    [(self._hist_batt,        ( 50, 200, 200), "Batt%"),
                     (self._hist_robots,      (200, 140,  70), "Robots"),
                     (self._hist_need_charge, ( 30,  80, 230), "NeedChg"),
@@ -1002,17 +1163,15 @@ class MainGame:
         font  = cv2.FONT_HERSHEY_SIMPLEX
         w, h  = x1 - x0, y1 - y0
         arr   = np.full((h, w, 3), (8, 8, 8), dtype=np.uint8)
-        arr[[0, -1], :] = (55, 55, 55)
-        arr[:, [0, -1]] = (55, 55, 55)
         cv2.putText(arr, "Zone Capacity", (4, 11), font, 0.32, (145, 145, 145), 1)
         wh = self.warehouse
         zones = [
-            ("Import",  wh.packagesInImportCount,  wh.numberOfImportSlots,  (200, 130,  60)),
-            ("Storage", wh.packagesInStorageCount, wh.numberOfStorageSlots, ( 80, 180, 200)),
-            ("Export",  wh.packagesInExportCount,  wh.numberOfExportSlots,  ( 80, 120, 220)),
+            ("Imp",     wh.packagesInImportCount,  wh.numberOfImportSlots,  (200, 130,  60)),
+            ("Sto",     wh.packagesInStorageCount, wh.numberOfStorageSlots, ( 80, 180, 200)),
+            ("Exp",     wh.packagesInExportCount,  wh.numberOfExportSlots,  ( 80, 120, 220)),
         ]
-        lbl_w     = 56                         # wide enough for "Storage" at fs=0.3
-        bar_max_w = w - lbl_w - 56 - 4          # 266-56-56-4=150; leaves 56px right margin
+        lbl_w     = 30                         # wide enough for "Sto" at fs=0.3
+        bar_max_w = w - lbl_w - 48 - 4          # leaves right margin for count/rate
         bar_h     = 14
         bar_slot  = 26                           # bar_h + gap; 3 slots = 78px, fits in 94px with header
         for i, (name, used, total, col) in enumerate(zones):

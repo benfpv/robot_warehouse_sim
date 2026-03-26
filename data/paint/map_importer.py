@@ -97,7 +97,7 @@ class MapImporter:
         zone_map[red_mask]   = ZONE_EXPORT   # applied last — red wins on overlap edges
 
         counts = {v: int(np.count_nonzero(zone_map == v)) for v in [1, 2, 3]}
-        print("[MapImporter] Loaded '{}' → {}×{} grid, slots: {}".format(path, gw, gh, counts))
+        print("[MapImporter] Loaded '{}' -> {}x{} grid, slots: {}".format(path, gw, gh, counts))
         return zone_map
 
     # ── Example PNG generator ──────────────────────────────────────────
@@ -106,10 +106,10 @@ class MapImporter:
     def generate_example_png(cls, path, gw=80, gh=70, cell_px=8):
         """Write an annotated example zone-map PNG to *path*.
 
-        Renders the default rectangular zone layout with a colour-coded legend
-        and instructions.  Open it in any image editor, flood-fill or paint
-        over the zones with any shade of the indicated colour family, then
-        save as resources/zone_map.png in the project root.
+        Renders the default three-band zone layout with a colour-coded legend
+        and instructions.  Open in any image editor, paint over the zones with
+        any shade of the indicated colour family, then save as
+        resources/zone_map.png in the project root.
         """
         font = cv2.FONT_HERSHEY_SIMPLEX
 
@@ -531,7 +531,7 @@ class MapImporter:
         ys, xs = np.where(valid_mask)
         coords = [[int(x), int(y)] for x, y in zip(xs, ys)]
 
-        print("[MapImporter] Spawn map '{}' → {} valid cells".format(path, len(coords)))
+        print("[MapImporter] Spawn map '{}' -> {} valid cells".format(path, len(coords)))
         return coords
 
     @classmethod

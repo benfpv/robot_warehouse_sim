@@ -1,6 +1,7 @@
 from datetime import date, datetime, timedelta
 import math
 import random
+import logging
 import numpy as np
 import cv2 
 import time
@@ -20,6 +21,16 @@ ZONE_NONE = 0
 ZONE_IMPORT = 1
 ZONE_STORAGE = 2
 ZONE_EXPORT = 3
+
+# ── Module-level logger ────────────────────────────────────────────────
+_log = logging.getLogger('warehouse')
+if not _log.handlers:
+    _log.setLevel(logging.DEBUG)
+    _fh = logging.FileHandler('warehouse.log', mode='w', encoding='utf-8')
+    _fh.setLevel(logging.DEBUG)
+    _fh.setFormatter(logging.Formatter('%(asctime)s  %(levelname)-5s  %(message)s', datefmt='%H:%M:%S'))
+    _log.addHandler(_fh)
+    _log.propagate = False
 
 class Warehouse:
     def __init__(self,
@@ -42,7 +53,7 @@ class Warehouse:
                     # Robots
                     packagesMovingList = [], robotsActionsList = ["none", "idle", "charging", "move to charging station", "move to target pickup location", "move to target dropoff location", "pickup target package", "dropoff target package"],
                     robots = [], robotsLog = [], robotsInWarehouse = [], robotsMaxQuantity = 60, robotsRollingCount = 0, robotsInWarehouseCount = 0,
-                    robotsTaskAssignmentList = [], robotsTaskAssignmentStyle = 0, robotsTaskAssignmentMaxQuantity = 3,
+                    robotsTaskAssignmentList = [], robotsTaskAssignmentStyle = 0, robotsTaskAssignmentMaxQuantity = 1,
                     numRobotsIdle = 0, numRobotsMoving = 0, numRobotsCharging = 0,
                     # Charging station(s)
                     chargersActionsList = ["none", "idle", "charging planned", "charging"], 
@@ -142,12 +153,27 @@ class Warehouse:
                                 if self._robotSpawnMap_override is not None
                                 else self.warehousePerimeterCoordinates)
         self.warehouse_data = Warehouse_Data(self.dataMaxLength)
+        # Adaptive power management state (recomputed every tick)
+        self._charger_pressure = 0.0    # ratio of busy chargers (0.0-1.0)
+        self._avg_fleet_battery = 100.0
+        self._charge_threshold = 30     # dynamic, recomputed in checkBattery
+
+        # ── Flow-control metrics ──
+        self._flow_export_times = []     # recent delivery durations (seconds)
+        self._flow_avg_delivery = 0.0    # EMA of delivery time (seconds)
+        self._flow_avg_deadline = 0.0    # EMA of time-to-deadline at spawn (seconds)
+        self._flow_throughput   = 0.0    # exports per second (EMA)
+        self._flow_last_export_t = time.time()
+        self._flow_import_cap   = int(self.packagesMaxQuantity * 0.5)  # start at target occupancy
+        self._flow_ema_alpha    = 0.02   # smoothing factor for EMAs
+        self._flow_target_occ   = 0.50   # target warehouse occupancy (50%)
     
     def update_warehouse(self):
         #self.printDebugInfo()
         self.datetimeNow = datetime.now() # Update datetime
         self.timeElapsed = time.time() - self.timeStart
         self.update_zone_counts() # Recompute slot counts from zoneMap (supports dynamic zones)
+        self.update_flow_control() # Adaptive import throttle based on congestion
         self.reconcile_zone_changes() # Process user-painted cells; partial-flush affected plans
         self.invalidate_stale_targets() # Cancel in-flight moves whose targets no longer match zoneMap
         self.recount_planned() # Authoritative recount of planned counts
@@ -163,6 +189,30 @@ class Warehouse:
         self.packagesLog, self.robotsLog = self.trim_logs()
         self.record_warehouse_data()
         #self.printDebugInfo()
+        # ── Periodic summary log (~every 5 sec at 40 tps) ──
+        if self.warehouseLoopCount % 200 == 0:
+            _n_overdue = sum(1 for p in self.packages if p.timeToDeadline.total_seconds() < 0)
+            _n_carried = sum(1 for p in self.packages if p.status == 'carried')
+            _n_planned = sum(1 for p in self.packages if p.status == 'move planned')
+            _n_idle_robots = sum(1 for r in self.robots if r.status == 'idle')
+            _n_charging = sum(1 for r in self.robots if r.status == 'charging')
+            _avg_drain = (sum(r.batteryDepletingRate * r.batteryDrainMultiplier for r in self.robots)
+                          / max(len(self.robots), 1))
+            _log.info(
+                'tick=%d  pkgs=%d (imp=%d sto=%d exp=%d)  moveList=%d  movingList=%d  '
+                'overdue=%d  carried=%d  planned=%d  exported=%d  '
+                'robots: idle=%d charging=%d  avg_drain=%.3f  pressure=%.2f  thresh=%.0f%%  '
+                'flow: cap=%d/%d  delivery=%.0fs  throughput=%.2f/s',
+                self.warehouseLoopCount,
+                len(self.packages), self.packagesInImportCount,
+                self.packagesInStorageCount, self.packagesInExportCount,
+                len(self.packagesMoveList), len(self.packagesMovingList),
+                _n_overdue, _n_carried, _n_planned,
+                self.packageExportRollingCount,
+                _n_idle_robots, _n_charging, _avg_drain,
+                self._charger_pressure, self._charge_threshold,
+                self._flow_import_cap, self.packagesMaxQuantity,
+                self._flow_avg_delivery, self._flow_throughput)
         self.warehouseLoopCount += 1
         return self
 
@@ -172,6 +222,74 @@ class Warehouse:
         self.numberOfStorageSlots = int(np.count_nonzero(self.zoneMap == ZONE_STORAGE))
         self.numberOfExportSlots  = int(np.count_nonzero(self.zoneMap == ZONE_EXPORT))
         self.packagesMaxQuantity  = self.numberOfImportSlots + self.numberOfStorageSlots + self.numberOfExportSlots
+
+    def update_flow_control(self):
+        """Compute adaptive import cap targeting ~50%% warehouse occupancy.
+
+        Base target = packagesMaxQuantity * target_occupancy (0.50).
+        Adjustments:
+          - Overdue penalty: reduce cap when packages are late
+          - Delivery-stress penalty: reduce cap when deliveries are slow vs deadlines
+          - Idle-robot bonus: raise cap slightly when robots have spare capacity
+          - Occupancy error: proportional correction toward the target occupancy
+        """
+        n_pkgs   = len(self.packages)
+        n_robots = len(self.robots)
+        max_cap  = self.packagesMaxQuantity
+        if n_robots == 0 or max_cap == 0:
+            self._flow_import_cap = max_cap
+            return
+
+        base_target = max_cap * self._flow_target_occ
+
+        # ── Signals ──────────────────────────────────────────
+        n_overdue = sum(1 for p in self.packages if p.timeToDeadline.total_seconds() < 0)
+        overdue_ratio = n_overdue / max(n_pkgs, 1)
+
+        n_idle_robots = sum(1 for r in self.robots if r.status == 'idle')
+        idle_robot_ratio = n_idle_robots / n_robots
+
+        current_occ = n_pkgs / max_cap
+        occ_error = current_occ - self._flow_target_occ  # positive = above target
+
+        if self._flow_avg_deadline > 0 and self._flow_avg_delivery > 0:
+            delivery_stress = self._flow_avg_delivery / self._flow_avg_deadline
+        else:
+            delivery_stress = 0.0
+
+        # ── Adjustments ──────────────────────────────────────
+        # Overdue penalty: up to 50% reduction at heavy overdue
+        overdue_penalty = min(overdue_ratio * 2.5, 0.50)
+
+        # Delivery-stress penalty: penalise when avg delivery > 60% of deadline window
+        stress_penalty = max(0.0, (delivery_stress - 0.6)) * 0.5
+
+        # Occupancy proportional correction: nudge cap when occupancy drifts from target
+        # +10% above target → 20% reduction; −10% below target → 20% increase
+        occ_correction = occ_error * 2.0
+
+        # Idle-robot bonus: raise cap when robots are idle and no overdue pressure
+        idle_bonus = 0.0
+        if overdue_ratio < 0.05 and idle_robot_ratio > 0.3:
+            idle_bonus = min((idle_robot_ratio - 0.3) * 0.4, 0.20)
+
+        # ── Combine into multiplier ──────────────────────────
+        adj = 1.0 - overdue_penalty - stress_penalty - occ_correction + idle_bonus
+        adj = max(0.20, min(1.30, adj))  # clamp
+
+        target_cap = int(base_target * adj)
+        target_cap = max(n_robots, min(max_cap, target_cap))
+
+        # Smooth: move 5% toward target each tick to avoid oscillation
+        self._flow_import_cap = int(self._flow_import_cap + 0.05 * (target_cap - self._flow_import_cap))
+        self._flow_import_cap = max(n_robots, min(max_cap, self._flow_import_cap))
+
+        # Track average deadline window from recently spawned packages
+        recent = [p for p in self.packages if (time.time() - p.createdAt) < 2.0]
+        if recent:
+            avg_dl = sum((p.deadline - datetime.fromtimestamp(p.createdAt)).total_seconds() for p in recent) / len(recent)
+            a = self._flow_ema_alpha
+            self._flow_avg_deadline = a * avg_dl + (1 - a) * self._flow_avg_deadline if self._flow_avg_deadline > 0 else avg_dl
 
     def invalidate_stale_targets(self):
         """Cancel in-flight moves whose target cells no longer match the intended zone."""
@@ -461,16 +579,24 @@ class Warehouse:
         elif self.numberOfImportSlots == 0 and self.numberOfStorageSlots == 0 and self.exportSpaceAvailable and self.numberOfExportSlots > 0:
             spawnZoneId = ZONE_EXPORT
         if spawnZoneId is not None:
-            self.packagesRollingCount, self.packagesInImportCount, self.packagesInWarehouseCount, self.packages, self.packagesLog = Package_Functions.import_package(Package_Functions, self.zoneMap, self.chargersInWarehouse, self.packagesRollingCount, self.packagesInImportCount, self.packagesInWarehouseCount, self.packagesInWarehouse, self.packageTargetsInWarehouse, self.packagesMaxQuantity, self.packages, self.packagesLog, self.itemsList, self.addressesList, self.datetimeNow, spawnZoneId=spawnZoneId) # Import package
+            # Use adaptive import cap instead of raw packagesMaxQuantity
+            _effective_cap = min(self._flow_import_cap, self.packagesMaxQuantity)
+            self.packagesRollingCount, self.packagesInImportCount, self.packagesInWarehouseCount, self.packages, self.packagesLog = Package_Functions.import_package(Package_Functions, self.zoneMap, self.chargersInWarehouse, self.packagesRollingCount, self.packagesInImportCount, self.packagesInWarehouseCount, self.packagesInWarehouse, self.packageTargetsInWarehouse, _effective_cap, self.packages, self.packagesLog, self.itemsList, self.addressesList, self.datetimeNow, spawnZoneId=spawnZoneId) # Import package
         self.packages = self.update_packages_timeToDeadline(self.datetimeNow) # Update package timeToDeadline
         self.packages.sort(key=lambda x: x.deadline, reverse=False) # Sort packages by deadline
+        self._reconcile_stale_moving_list()  # Clean orphaned packagesMovingList entries
         self.packagesMoveList = self.sort_packagesMoveList_by_deadline()
         self.packagesMoveList, self.packages, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount = self.remove_immovables_from_packagesMoveList()
         self.packagesMoveList, self.packages = self.append_to_packagesMoveList() # Add to packagesMoveList based on deadline
+        # Re-sort after append: packages appended above land at the end of the list,
+        # but may be more urgent than existing entries (e.g. newly overdue).
+        # Robot assignment iterates packagesMoveList front-to-back, so position == priority.
+        self.packagesMoveList = self.sort_packagesMoveList_by_deadline()
         self.packages, self.packageTargetsInWarehouse, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount = self.update_packages_targetLocation() # Decide to Move Package to Storage or Export
         self.packageTargetsInWarehouse = self.update_packageTargetsInWarehouse()
         self.packages = self.update_packages_colours(self.datetimeNow)
         self.packages, self.packageExportCount, self.packageExportRollingCount = self.package_export()
+
         return self.packages, self.packagesRollingCount, self.packagesInWarehouseCount, self.packagesLog, self.packageTargetsInWarehouse, self.packageExportCount, self.packageExportRollingCount
 
     def update_packages_timeToDeadline(self, datetimeNow):
@@ -490,6 +616,127 @@ class Warehouse:
                 self.packagesMoveList.insert(packageInMoveListCount, packageNumber)
                 packageInMoveListCount += 1
         return self.packagesMoveList
+
+    def _find_nearest_empty_cell(self, cx, cy):
+        """BFS from (cx, cy) to find nearest cell with no package, charger, or robot.
+
+        Returns [nx, ny] or [cx, cy] if nothing found (fallback to same cell).
+        """
+        W, H = self.warehouseWindowRes
+        from collections import deque
+        visited = set()
+        q = deque()
+        q.append((cx, cy))
+        visited.add((cx, cy))
+        while q:
+            x, y = q.popleft()
+            if (self.packagesInWarehouse[y][x] == 0
+                    and self.chargersInWarehouse[y][x] == 0
+                    and self.robotsInWarehouse[y][x] == 0):
+                return [x, y]
+            for dx, dy in [(0, -1), (0, 1), (-1, 0), (1, 0)]:
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < W and 0 <= ny < H and (nx, ny) not in visited:
+                    visited.add((nx, ny))
+                    q.append((nx, ny))
+        return [cx, cy]  # fallback
+
+    def _find_nearest_neutral_cell(self, cx, cy):
+        """BFS from (cx, cy) to find nearest ZONE_NONE cell with no package, charger, or robot.
+
+        Used to park idle robots in neutral corridors after charging.
+        Returns (nx, ny) or None if nothing found.
+        """
+        W, H = self.warehouseWindowRes
+        from collections import deque
+        visited = set()
+        q = deque()
+        q.append((cx, cy))
+        visited.add((cx, cy))
+        while q:
+            x, y = q.popleft()
+            if (self.zoneMap[y][x] == ZONE_NONE
+                    and self.packagesInWarehouse[y][x] == 0
+                    and self.chargersInWarehouse[y][x] == 0
+                    and self.robotsInWarehouse[y][x] == 0):
+                return (x, y)
+            for dx, dy in [(0, -1), (0, 1), (-1, 0), (1, 0)]:
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < W and 0 <= ny < H and (nx, ny) not in visited:
+                    visited.add((nx, ny))
+                    q.append((nx, ny))
+        return None
+
+    def _reconcile_stale_moving_list(self):
+        """Remove orphaned entries from packagesMovingList.
+
+        A package can become stranded in packagesMovingList when a robot's
+        pickup task is cancelled (e.g. low-battery preemption inserts a
+        charging task and the pickup task is dropped, or reconcile_zone_changes
+        strips tasks).  The package reverts to idle/carrier=-1 but is never
+        removed from packagesMovingList, permanently blocking it from being
+        re-queued.
+
+        Ground-truth: a package belongs in packagesMovingList only if a robot
+        currently has a pickup or dropoff task targeting it, OR the package
+        status is 'carried'.
+        """
+        if not self.packagesMovingList:
+            return
+        # Build set of package locations that robots are actively working on
+        _active_pickup_locs = set()
+        for r in self.robots:
+            for task in r.actionQueue:
+                if task[1] in ("move to target pickup location", "pick up target package"):
+                    _active_pickup_locs.add(tuple(task[0]))
+        # Also include packages currently being carried
+        _carried_pkgs = {p.packageNumber for p in self.packages if p.status == 'carried'}
+        # Detect zombie carries: packages stuck on robots at 0% battery
+        _zombie_carriers = {r.carrying for r in self.robots
+                           if r.carrying != -1 and r.batteryPercent <= 0}
+        for _zpkg in _zombie_carriers:
+            _zidx = next((j for j, p in enumerate(self.packages)
+                          if p.packageNumber == _zpkg), None)
+            if _zidx is not None and self.packages[_zidx].status == 'carried':
+                _zrobot_idx = next((j for j, r in enumerate(self.robots)
+                                    if r.carrying == _zpkg), None)
+                if _zrobot_idx is not None:
+                    _zloc = self._find_nearest_empty_cell(
+                        self.packages[_zidx].xyLocation[0], self.packages[_zidx].xyLocation[1])
+                    self.packages[_zidx].xyLocation = _zloc
+                    _log.warning('zombie carry: robot#%d at 0%% stuck with pkg#%d -- force-dropping at %s',
+                                 self.robots[_zrobot_idx].robotNumber, _zpkg, _zloc)
+                    self.packages[_zidx].status = 'idle'
+                    self.packages[_zidx].carrier = -1
+                    self.packages[_zidx].areaTarget = 'none'
+                    self.packages[_zidx].xyLocationTarget = self.packages[_zidx].xyLocation.copy()
+                    self.robots[_zrobot_idx].carrying = -1
+                    if _zpkg in self.packagesMovingList:
+                        self.packagesMovingList.remove(_zpkg)
+                    if _zpkg in self.packagesMoveList:
+                        self.packagesMoveList.remove(_zpkg)
+
+        for pkg_num in list(self.packagesMovingList):
+            if pkg_num in _carried_pkgs:
+                continue
+            pkg_idx = next((j for j, p in enumerate(self.packages) if p.packageNumber == pkg_num), None)
+            if pkg_idx is None:
+                # Package no longer exists
+                self.packagesMovingList.remove(pkg_num)
+                continue
+            p = self.packages[pkg_idx]
+            if p.status in ('carried',):
+                continue
+            # Check if any robot is heading to pick up this package
+            pkg_loc = tuple(p.xyLocation)
+            if pkg_loc not in _active_pickup_locs:
+                # Orphaned: no robot is heading for this package
+                _log.warning('stale movingList: pkg#%d status=%s area=%s loc=%s -- removed',
+                             pkg_num, p.status, p.area, p.xyLocation)
+                self.packagesMovingList.remove(pkg_num)
+                # Also clean up packagesMoveList if present with stale state
+                if pkg_num in self.packagesMoveList and p.status == 'idle' and p.areaTarget == 'none':
+                    self.packagesMoveList.remove(pkg_num)
 
     def remove_immovables_from_packagesMoveList(self):
         if not self.packagesMoveList:
@@ -548,6 +795,14 @@ class Warehouse:
         return self.packagesMoveList, self.packages, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount
 
     def append_to_packagesMoveList(self):
+        # Dynamic planning depth: only plan as many moves as robots can realistically
+        # execute soon.  available_robots * 2 gives a one-task pipeline buffer.
+        available_robots = sum(1 for r in self.robots
+                               if r.status not in ('charging', 'move to charging station')
+                               and r.batteryPercent >= 10)
+        effective_move_cap = max(available_robots * 2, 4)  # floor of 4 to avoid stalling
+        effective_move_cap = min(effective_move_cap, self.packagesMaxMoveQuantity)
+
         # Headroom = genuinely available destination slots this tick.
         # Cap new moveList entries to total_headroom so we don't queue more
         # packages than there are slots to assign targets to this tick.
@@ -567,11 +822,24 @@ class Warehouse:
                 if (p.status == 'idle' and p.area != 'export'
                         and pkg_num not in self.packagesMoveList
                         and pkg_num not in self.packagesMovingList
-                        and len(self.packagesMoveList) < self.packagesMaxMoveQuantity):
+                        and len(self.packagesMoveList) < effective_move_cap):
                     self.packagesMoveList.insert(0, pkg_num)
         self.packagesReorgList.clear()
+        # Overdue-priority pass: idle packages past their deadline are inserted at the
+        # front of the move list regardless of headroom budget.  update_packages_targetLocation
+        # will either find a free export slot for them directly, or use the preemption path
+        # below to displace the least-urgent non-overdue planned package.
+        for _i in range(len(self.packages)):
+            _p = self.packages[_i]
+            if (_p.timeToDeadline.total_seconds() < 0
+                    and _p.status == 'idle'
+                    and _p.area != 'export'
+                    and _p.packageNumber not in self.packagesMoveList
+                    and _p.packageNumber not in self.packagesMovingList
+                    and len(self.packagesMoveList) < effective_move_cap):
+                self.packagesMoveList.insert(0, _p.packageNumber)
         # Add package to packagesMoveList if there is enough bandwidth
-        if (len(self.packagesMoveList) < self.packagesMaxMoveQuantity):
+        if (len(self.packagesMoveList) < effective_move_cap):
             for i in range(len(self.packages)):
                 if new_entries >= total_headroom:
                     break
@@ -592,36 +860,57 @@ class Warehouse:
                     if (addPackage == True):
                         self.packagesMoveList.append(packageNumber)
                         new_entries += 1
-                # Cut packagesMoveList Loop if exceeded packagesMaxMoveQuantity
-                if (len(self.packagesMoveList) >= self.packagesMaxMoveQuantity):
+                # Cut packagesMoveList Loop if exceeded effective_move_cap
+                if (len(self.packagesMoveList) >= effective_move_cap):
                     break
         return self.packagesMoveList, self.packages
     
     def update_packages_targetLocation(self):
         if not self.packagesMoveList:
             return self.packages, self.packageTargetsInWarehouse, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount
-        # Replace the binary spaceAvailable gate with direct headroom counters.
-        #
-        # Headroom = physical free slots - already-planned slots
-        #          = (totalSlots - inZoneCount) - plannedCount
-        #
-        # Each new assignment decrements the headroom, so the number of new
-        # plans made this tick is exactly bounded by the true current capacity.
-        # This eliminates the binary-flag "wave" where all idle packages
-        # simultaneously get (or lose) targets when a gate flag flips.
         export_headroom  = max(0, self.numberOfExportSlots  - self.packagesInExportCount  - self.packagesPlannedInExportCount)
         storage_headroom = max(0, self.numberOfStorageSlots - self.packagesInStorageCount - self.packagesPlannedInStorageCount)
+
+        # ── Redirect: cancel suboptimal storage targets for overdue packages ──
+        # An overdue import package that was planned for storage (because export
+        # was full last tick) keeps its "move planned" status indefinitely,
+        # blocking the overdue-priority pass and the assignment loop from ever
+        # re-routing it to export.  Cancel the plan so it can compete for export
+        # headroom in this tick's assignment.
+        for i in range(len(self.packages)):
+            p = self.packages[i]
+            if (p.packageNumber in self.packagesMoveList
+                    and p.timeToDeadline.total_seconds() < 0
+                    and p.status == 'move planned'
+                    and p.areaTarget == 'storage'
+                    and p.packageNumber not in self.packagesMovingList):
+                tx, ty = p.xyLocationTarget
+                self.packageTargetsInWarehouse[ty][tx] = 0
+                p.xyLocationTarget = p.xyLocation.copy()
+                p.areaTarget = 'none'
+                p.status = 'idle'
+                self.packagesPlannedInStorageCount = max(0, self.packagesPlannedInStorageCount - 1)
+                storage_headroom += 1
+                _log.info('overdue redirect: pkg#%d storage->idle (ttd=%.1fs)',
+                          p.packageNumber, p.timeToDeadline.total_seconds())
+
+        # ── Main pass: assign targets in deadline order (overdue first) ──
+        # Routing policy: only send to export when deadline is near (<=30s) or
+        # already overdue.  Packages with plenty of time go to storage first,
+        # keeping export lean and reserved for urgent packages.
+        _EXPORT_URGENCY_SECS = 30  # seconds before deadline to qualify for export
         for i in range(len(self.packages)):
             packageNumber = self.packages[i].packageNumber
             packageStatus = self.packages[i].status
             packageArea = self.packages[i].area
             packageAreaTarget = self.packages[i].areaTarget
-            packageXYLocationTarget = self.packages[i].xyLocationTarget
             if (packageNumber in self.packagesMoveList):
                 if (packageStatus == 'idle'):
                     movePackage = False
-                    # Try to store package in Export
-                    if (movePackage == False) and (export_headroom > 0):
+                    ttd = self.packages[i].timeToDeadline.total_seconds()
+                    is_urgent = ttd <= _EXPORT_URGENCY_SECS  # overdue or near-deadline
+                    # Try to store package in Export (only if urgent)
+                    if (movePackage == False) and (export_headroom > 0) and is_urgent:
                         if (packageArea != 'export') and (packageAreaTarget != 'export'):
                             movePackage, xyLocation = Package_Functions.try_packageTargetLocation(self.zoneMap, ZONE_EXPORT, self.packagesInWarehouse, self.packageTargetsInWarehouse, self.chargersInWarehouse)
                             if (movePackage == True):
@@ -636,17 +925,68 @@ class Warehouse:
                                 self.packages[i].areaTarget = 'storage'
                                 self.packagesPlannedInStorageCount += 1
                                 storage_headroom -= 1
+                    # Fallback: non-urgent package but storage full — try export anyway
+                    if (movePackage == False) and (export_headroom > 0) and not is_urgent:
+                        if (packageArea != 'export') and (packageAreaTarget != 'export'):
+                            movePackage, xyLocation = Package_Functions.try_packageTargetLocation(self.zoneMap, ZONE_EXPORT, self.packagesInWarehouse, self.packageTargetsInWarehouse, self.chargersInWarehouse)
+                            if (movePackage == True):
+                                self.packages[i].areaTarget = 'export'
+                                self.packagesPlannedInExportCount += 1
+                                export_headroom -= 1
                     # Move the package (or take no action)
                     if (movePackage == True):
                         self.packages[i].xyLocationTarget = xyLocation.copy()
                         self.packages[i].status = 'move planned'
                         self.packageTargetsInWarehouse[xyLocation[1]][xyLocation[0]] = 1
+
+        # ── Overdue preemption pass (runs AFTER the main pass) ──
+        # The main pass processed packages by deadline (overdue first).  If an
+        # overdue package couldn't get an export target because headroom was 0,
+        # non-overdue packages later in the loop may have received export targets.
+        # Those targets now exist as 'move planned' and can be preempted here.
+        for i in range(len(self.packages)):
+            p = self.packages[i]
+            if (p.packageNumber in self.packagesMoveList
+                    and p.status == 'idle'
+                    and p.areaTarget == 'none'
+                    and p.timeToDeadline.total_seconds() < 0
+                    and p.area != 'export'):
+                _evict_idx = None
+                _evict_deadline = p.deadline
+                for _j in range(len(self.packages)):
+                    _pj = self.packages[_j]
+                    if (_j != i
+                            and _pj.status == 'move planned'
+                            and _pj.areaTarget == 'export'
+                            and _pj.packageNumber not in self.packagesMovingList
+                            and _pj.timeToDeadline.total_seconds() > 0
+                            and _pj.deadline > _evict_deadline):
+                        _evict_deadline = _pj.deadline
+                        _evict_idx = _j
+                if _evict_idx is not None:
+                    _ep = self.packages[_evict_idx]
+                    _log.info('overdue preempt: pkg#%d (ttd=%.1fs) evicts pkg#%d (ttd=%.1fs)',
+                              p.packageNumber, p.timeToDeadline.total_seconds(),
+                              _ep.packageNumber, _ep.timeToDeadline.total_seconds())
+                    _etx, _ety = _ep.xyLocationTarget
+                    self.packageTargetsInWarehouse[_ety][_etx] = 0
+                    _ep.xyLocationTarget = _ep.xyLocation.copy()
+                    _ep.areaTarget = 'none'
+                    _ep.status = 'idle'
+                    self.packagesPlannedInExportCount = max(0, self.packagesPlannedInExportCount - 1)
+                    export_headroom += 1
+                    movePackage, xyLocation = Package_Functions.try_packageTargetLocation(
+                        self.zoneMap, ZONE_EXPORT, self.packagesInWarehouse,
+                        self.packageTargetsInWarehouse, self.chargersInWarehouse)
+                    if movePackage:
+                        p.areaTarget = 'export'
+                        p.xyLocationTarget = xyLocation.copy()
+                        p.status = 'move planned'
+                        self.packageTargetsInWarehouse[xyLocation[1]][xyLocation[0]] = 1
+                        self.packagesPlannedInExportCount += 1
+                        export_headroom -= 1
+
         # Sweep: remove moveList entries that couldn't get a target this tick.
-        # Headroom counters can slightly overestimate when chargers or in-transit
-        # packages physically block zone cells without being reflected in the
-        # zone-level counts.  Without this sweep those stranded entries (idle,
-        # areaTarget still "none") would appear as a one-frame green flash before
-        # remove_immovables cleans them next tick.
         for pkgNum in list(self.packagesMoveList):
             if pkgNum in self.packagesMovingList:
                 continue
@@ -656,17 +996,16 @@ class Warehouse:
         return self.packages, self.packageTargetsInWarehouse, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount
 
     def update_packageTargetsInWarehouse(self):
+        self.packageTargetsInWarehouse = np.zeros((self.warehouseWindowRes[1], self.warehouseWindowRes[0]), dtype = 'uint8')
         if not self.packagesMoveList:
             return self.packageTargetsInWarehouse
-        else:
-            self.packageTargetsInWarehouse = np.zeros((self.warehouseWindowRes[1], self.warehouseWindowRes[0]), dtype = 'uint8')
-            for packageNumber in self.packagesMoveList:
-                packageIndex = [y for y, x in enumerate(self.packages) if x.packageNumber == packageNumber]
-                if packageIndex:
-                    packageIndex = packageIndex[0]
-                    packageXYLocationTarget = self.packages[packageIndex].xyLocationTarget
-                    self.packageTargetsInWarehouse[packageXYLocationTarget[1]][packageXYLocationTarget[0]] = 1
-            return self.packageTargetsInWarehouse
+        for packageNumber in self.packagesMoveList:
+            packageIndex = [y for y, x in enumerate(self.packages) if x.packageNumber == packageNumber]
+            if packageIndex:
+                packageIndex = packageIndex[0]
+                packageXYLocationTarget = self.packages[packageIndex].xyLocationTarget
+                self.packageTargetsInWarehouse[packageXYLocationTarget[1]][packageXYLocationTarget[0]] = 1
+        return self.packageTargetsInWarehouse
     
     def update_carried_packages(self):
         if not self.packages:
@@ -727,6 +1066,7 @@ class Warehouse:
     def package_export(self):
         self.packageExportCount = 0
         lenPackages = len(self.packages)
+        _now = time.time()
         i = 0
         while 1:
             if (not self.packages):
@@ -743,6 +1083,21 @@ class Warehouse:
             canExport = (packageArea == "export") or (self.numberOfExportSlots == 0)
             if canExport and (packageTimeToDeadline < timedelta(seconds=0)) and (packageStatus == "idle"):
                 #print("- packageTimeToDeadline: {}".format(packageTimeToDeadline))
+                _delivery_time = _now - self.packages[i].createdAt
+                self._flow_export_times.append(_delivery_time)
+                if len(self._flow_export_times) > 200:
+                    self._flow_export_times.pop(0)
+                # Update delivery-time EMA
+                a = self._flow_ema_alpha
+                self._flow_avg_delivery = a * _delivery_time + (1 - a) * self._flow_avg_delivery if self._flow_avg_delivery > 0 else _delivery_time
+                # Update throughput EMA (seconds since last export)
+                _gap = _now - self._flow_last_export_t
+                if _gap > 0:
+                    _inst_rate = 1.0 / _gap
+                    self._flow_throughput = a * _inst_rate + (1 - a) * self._flow_throughput if self._flow_throughput > 0 else _inst_rate
+                self._flow_last_export_t = _now
+                _log.debug('export: pkg#%d  deadline_margin=%s  loc=%s  delivery=%.0fs',
+                           self.packages[i].packageNumber, packageTimeToDeadline, packageLocation, _delivery_time)
                 self.packages.pop(i)
                 self.packageExportCount += 1
                 self.packageExportRollingCount += 1
@@ -806,9 +1161,25 @@ class Warehouse:
         return self.chargers, self.chargersRollingCount, self.chargersInWarehouse
 
     def update_robots_batteryPercent(self):
+        # State-aware drain multipliers
+        DRAIN_IDLE     = 0.1   # stationary, minimal systems draw
+        DRAIN_MOVING   = 1.0   # baseline motor cost
+        DRAIN_CARRYING = 1.5   # extra load while transporting a package
+        DRAIN_CHARGING = 0.0   # no drain while docked at charger
+        # Fleet-aware eco factor: when chargers are scarce, robots conserve energy
+        # Pressure > 0.5 starts reducing drain; at pressure 1.0, drain cut by 30%
+        _eco = 1.0 - 0.3 * max(0.0, self._charger_pressure - 0.5) * 2.0
         for i in range(len(self.robots)):
-            self.robots[i].batteryPercent -= self.robots[i].batteryDepletingRate
-            self.robots[i].batteryPercent = np.round(self.robots[i].batteryPercent,2)
+            r = self.robots[i]
+            if r.status == 'charging':
+                mult = DRAIN_CHARGING
+            elif r.xyLocation != r.xyLocationTarget:
+                mult = DRAIN_CARRYING if r.carrying != -1 else DRAIN_MOVING
+            else:
+                mult = DRAIN_IDLE
+            r.batteryDrainMultiplier = mult
+            r.batteryPercent -= round(r.batteryDepletingRate * mult * _eco, 4)
+            r.batteryPercent = np.round(r.batteryPercent, 2)
         return self.robots
     
     def update_robots_checkBattery(self):
@@ -825,20 +1196,33 @@ class Warehouse:
             if charger.status == "charging planned" and tuple(charger.xyLocation) not in actively_claimed:
                 charger.status = "idle"
         # --- End reconciliation ---
+        # --- Adaptive power metrics ---
+        _n_chargers = max(len(self.chargers), 1)
+        _n_busy = sum(1 for c in self.chargers if c.status != 'idle')
+        self._charger_pressure = _n_busy / _n_chargers
+        self._avg_fleet_battery = (sum(r.batteryPercent for r in self.robots)
+                                   / max(len(self.robots), 1))
+        # Dynamic charge threshold: 25% base, scales up with charger pressure
+        # At pressure 0: 25% | 0.5: 37.5% | 1.0: 50%
+        self._charge_threshold = 25 + 25 * self._charger_pressure
+        # --- End adaptive metrics ---
         for i in range(len(self.robots)):
-            if self.robots[i].batteryPercent <= 20:
-                # ************* Make smarter logic for deciding to recharge or other
+            if self.robots[i].batteryPercent <= self._charge_threshold:
                 if self.robots[i].status != "charging":
                     if self.robots[i].actionQueue:
                         robotQueuedCharging = [x for x in self.robots[i].actionQueue if "move to charging station" in x]
                         if not robotQueuedCharging:
-                            chargerAvailable, c = self.find_available_charger()
+                            chargerAvailable, c = self.find_available_charger(self.robots[i])
                             if (chargerAvailable == True):
                                 chargingStationLocation = self.chargers[c].xyLocation
                                 #print('- chargingStationLocation: {}'.format(chargingStationLocation))
                                 if ("dropoff" not in self.robots[i].status):
+                                    _prev_task = self.robots[i].actionQueue[1][1] if len(self.robots[i].actionQueue) > 1 else 'none'
                                     self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_insert_task(i, 0, chargingStationLocation, "move to charging station")
                                     self.chargers[c].status = "charging planned"
+                                    _log.info('battery preempt: robot#%d batt=%.1f%% -> charger %s (displaced: %s)',
+                                              self.robots[i].robotNumber, self.robots[i].batteryPercent,
+                                              chargingStationLocation, _prev_task)
                                     # Return Package to packagesMoveList
                                     #robotActionToReturn = self.robots[i].actionQueue[1]
                                     #packagePosition = robotActionToReturn[0]
@@ -855,25 +1239,68 @@ class Warehouse:
                                 #print('- Robot #{}: Battery low'.format(i))
                                 #print('- robotTaskAssignmentIndex: {}'.format(robotTaskAssignmentIndex))
                     else:
-                        chargerAvailable, c = self.find_available_charger()
+                        chargerAvailable, c = self.find_available_charger(self.robots[i])
                         if (chargerAvailable == True):
                             chargingStationLocation = self.chargers[c].xyLocation
                             if ("dropoff" not in self.robots[i].status):
                                 self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_insert_task(i, 0, chargingStationLocation, "move to charging station")
                                 self.chargers[c].status = "charging planned"
                                 self.robotsTaskAssignmentList.sort(key=lambda y: y[1], reverse=False) # Sort robotTasksAssignmentList by #tasks
+                                _log.info('battery preempt: robot#%d batt=%.1f%% -> charger %s (idle robot)',
+                                          self.robots[i].robotNumber, self.robots[i].batteryPercent,
+                                          chargingStationLocation)
                             #print('- Robot #{}: Battery low'.format(i))
                             #print('- robotTaskAssignmentIndex: {}'.format(robotTaskAssignmentIndex))
+            # Opportunistic top-off: idle robots charge proactively when chargers plentiful
+            elif (self.robots[i].batteryPercent <= 70
+                  and self._charger_pressure < 0.3
+                  and self.robots[i].status == 'idle'
+                  and not self.robots[i].actionQueue):
+                chargerAvailable, c = self.find_available_charger(self.robots[i])
+                if chargerAvailable:
+                    _csl = self.chargers[c].xyLocation
+                    self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_insert_task(i, 0, _csl, "move to charging station")
+                    self.chargers[c].status = "charging planned"
+                    self.robotsTaskAssignmentList.sort(key=lambda y: y[1], reverse=False)
+                    _log.debug('opportunistic top-off: robot#%d batt=%.1f%% pressure=%.2f -> charger %s',
+                               self.robots[i].robotNumber, self.robots[i].batteryPercent,
+                               self._charger_pressure, _csl)
             if self.robots[i].batteryPercent <= 5:
-                # ************* ENTER SLEEP MODE, NEED TO BE PICKED UP BY BOT **********
-                pass
+                # Battery critically low — emergency-drop carried package so it
+                # doesn't get permanently stuck on a dying robot.
+                if self.robots[i].carrying != -1:
+                    _epkg = self.robots[i].carrying
+                    _epidx = next((j for j, p in enumerate(self.packages)
+                                   if p.packageNumber == _epkg), None)
+                    if _epidx is not None:
+                        _eloc = self._find_nearest_empty_cell(
+                            self.robots[i].xyLocation[0], self.robots[i].xyLocation[1])
+                        self.packages[_epidx].xyLocation = _eloc
+                        _log.warning('emergency drop: robot#%d batt=%.1f%% force-dropping pkg#%d at %s',
+                                     self.robots[i].robotNumber, self.robots[i].batteryPercent,
+                                     _epkg, _eloc)
+                        self.packages[_epidx].status = 'idle'
+                        self.packages[_epidx].carrier = -1
+                        self.packages[_epidx].areaTarget = 'none'
+                        self.packages[_epidx].xyLocationTarget = self.packages[_epidx].xyLocation.copy()
+                        self.packageTargetsInWarehouse[self.packages[_epidx].xyLocation[1]][self.packages[_epidx].xyLocation[0]] = 0
+                        self.robots[i].carrying = -1
+                        # Clean up move/moving lists
+                        if _epkg in self.packagesMovingList:
+                            self.packagesMovingList.remove(_epkg)
+                        if _epkg in self.packagesMoveList:
+                            self.packagesMoveList.remove(_epkg)
+                        # Strip delivery tasks from robot queue
+                        for _tname in ('move to target dropoff location', 'drop off target package',
+                                       'move to target pickup location', 'pick up target package'):
+                            self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, _tname)
             self.robots[i].batteryPercent = Functions.ensure_limit_1d(self.robots[i].batteryPercent, 0, 100)
         
         #print(self.robotsTaskAssignmentList[0][0])
         #print(i)
         return self.robots, self.robotsTaskAssignmentList, self.robotsLog, self.chargers, self.packagesMoveList
     
-    def find_available_charger(self):
+    def find_available_charger(self, requesting_robot=None):
         # Ground-truth: any charger location already in a robot's action queue is claimed,
         # regardless of the charger's status field (guards against stale status).
         claimed = set()
@@ -881,8 +1308,14 @@ class Warehouse:
             for task in r.actionQueue:
                 if task[1] in ("move to charging station", "charging"):
                     claimed.add(tuple(task[0]))
+        # Exclude chargers physically occupied by another robot (prevents stacking).
+        occupied = set()
+        for r in self.robots:
+            if r is not requesting_robot:
+                occupied.add(tuple(r.xyLocation))
         for c in range(len(self.chargers)):
-            if self.chargers[c].status == "idle" and tuple(self.chargers[c].xyLocation) not in claimed:
+            loc = tuple(self.chargers[c].xyLocation)
+            if self.chargers[c].status == "idle" and loc not in claimed and loc not in occupied:
                 return True, c
         return False, -1
 
@@ -915,6 +1348,18 @@ class Warehouse:
                             if (robotTaskQuantity < self.robotsTaskAssignmentMaxQuantity):
                                 robotNumberInList = self.robotsTaskAssignmentList[0][0]
                                 robotIndex = [y for y, x in enumerate(self.robots) if x.robotNumber == robotNumberInList][0]
+                                # Battery saving mode: don't assign new work to robots below 10%
+                                if self.robots[robotIndex].batteryPercent < 10:
+                                    continue
+                                # Trip feasibility: estimate if robot can complete round trip
+                                _rx, _ry = self.robots[robotIndex].xyLocation
+                                _px, _py = packagePosition
+                                _tx, _ty = self.packages[packageIndex].xyLocationTarget
+                                _trip_dist = abs(_rx - _px) + abs(_ry - _py) + abs(_px - _tx) + abs(_py - _ty)
+                                _trip_cost = _trip_dist * self.robots[robotIndex].batteryDepletingRate * 1.25
+                                _batt_avail = self.robots[robotIndex].batteryPercent - self._charge_threshold
+                                if _trip_cost > _batt_avail:
+                                    continue
                                 #print('- self.robotsTaskAssignmentList: {}'.format(self.robotsTaskAssignmentList))
                                 #print('- self.robots[{}].actionQueue: {}'.format(robotNumber, self.robots[robotNumber].actionQueue))
                                 if self.robots[robotIndex].actionQueue:
@@ -923,10 +1368,14 @@ class Warehouse:
                                         self.robots[robotIndex], self.robotsTaskAssignmentList, self.robotsLog = self.robot_insert_task(robotIndex, robotTaskQuantity, packagePosition, "move to target pickup location")
                                         self.packagesMovingList.append(packageNumber)
                                         self.robotsTaskAssignmentList.sort(key=lambda y: y[1], reverse=False) # Sort robotTasksAssignmentList by #tasks
+                                        _log.debug('task assign: robot#%d -> pickup pkg#%d at %s',
+                                                   self.robots[robotIndex].robotNumber, packageNumber, packagePosition)
                                 else:
                                     self.robots[robotIndex], self.robotsTaskAssignmentList, self.robotsLog = self.robot_insert_task(robotIndex, robotTaskQuantity, packagePosition, "move to target pickup location")
                                     self.packagesMovingList.append(packageNumber)
                                     self.robotsTaskAssignmentList.sort(key=lambda y: y[1], reverse=False) # Sort robotTasksAssignmentList by #tasks
+                                    _log.debug('task assign: robot#%d -> pickup pkg#%d at %s',
+                                               self.robots[robotIndex].robotNumber, packageNumber, packagePosition)
 
             # If extra work is possible (i.e., export is blocked, storage is not entirely filled, and import packages can not be fit into MoveList), 
         #print('-- post-update: ')
@@ -954,6 +1403,13 @@ class Warehouse:
             currentLocation = self.robots[i].xyLocation
             targetLocation = self.robots[i].xyLocationTarget
             if (currentLocation != targetLocation):
+                # Battery saving mode: skip every other movement tick at <10%
+                if self.robots[i].batteryPercent < 10:
+                    if not getattr(self.robots[i], '_lowbatt_skip', False):
+                        self.robots[i]._lowbatt_skip = True
+                        continue
+                    else:
+                        self.robots[i]._lowbatt_skip = False
                 #print('- robot#{}: currentLoc: {}. targetLoc: {}'.format(i, currentLocation, targetLocation))
                 diffX = self.robots[i].xyLocationTarget[0] - self.robots[i].xyLocation[0]
                 diffY = self.robots[i].xyLocationTarget[1] - self.robots[i].xyLocation[1]
@@ -1020,6 +1476,12 @@ class Warehouse:
                         else: # Just leaving charging station
                             self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, "charging")
                             self.chargers[chargingStationIndex].status = "idle"
+                            # Move robot to nearest neutral-zone cell (no zone) to idle
+                            if not self.robots[i].actionQueue:
+                                _idle_target = self._find_nearest_neutral_cell(
+                                    self.robots[i].xyLocation[0], self.robots[i].xyLocation[1])
+                                if _idle_target:
+                                    self.robots[i].xyLocationTarget = list(_idle_target)
                             #chargingActionIndex = [i2 for i2, x in enumerate(self.robots[i].actionQueue) if "charging" in x][0]
                             #self.robots[i].actionQueue.pop(chargingActionIndex)
                             #robotTaskAssignmentIndex = [x for x in self.robotsTaskAssignmentList if x[0] == i][0][0]
@@ -1061,17 +1523,15 @@ class Warehouse:
                                 if (self.robots[i].status != "carried") and (self.packages[packageIndex].status != "carried"):
                                     self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_replace_task(i, "move to target pickup location", currentLocation, "pick up target package")
                     elif (self.robots[i].actionQueue[0][0] == currentLocation) and (self.robots[i].actionQueue[0][1] == "move to target dropoff location"):
-                        packageIndex = [y for y, x in enumerate(self.packages) if x.xyLocation == currentLocation]
-                        if packageIndex:
-                            packageIndex = packageIndex[0]
+                        # Find the package this robot is carrying by robotNumber, not by cell
+                        # (an idle package already sitting at the dropoff cell would fool a
+                        # location-based search and block the carried→dropoff transition).
+                        _carrying = self.robots[i].carrying
+                        packageIndex = next((y for y, x in enumerate(self.packages)
+                                            if x.packageNumber == _carrying), None)
+                        if packageIndex is not None:
                             packageLocation = self.packages[packageIndex].xyLocation
                             packageLocationTarget = self.packages[packageIndex].xyLocationTarget
-                            #print("- packageIndex: {}".format(packageIndex))
-                            #print("- robotLocation: {}".format(currentLocation))
-                            #print("- packageLocation: {}".format(packageLocation))
-                            #print("- packageLocationTarget: {}".format(packageLocationTarget))
-                            #print("- self.robots[i].status: {}".format(self.robots[i].status))
-                            #print("- self.packages[packageIndex].status: {}".format(self.packages[packageIndex].status))
                             if currentLocation == packageLocationTarget:
                                 if (self.robots[i].status != "carried") and (self.packages[packageIndex].status == "carried"):
                                     self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_replace_task(i, "move to target dropoff location", currentLocation, "drop off target package")
@@ -1096,6 +1556,12 @@ class Warehouse:
                             packageNumber = self.packages[packageIndex].packageNumber
                             packageLocationTarget = self.packages[packageIndex].xyLocationTarget
                             if (self.robots[i].status != "carried") and (self.packages[packageIndex].status != "carried"):
+                                # Block pickup if battery too low — robot can't reliably deliver
+                                if self.robots[i].batteryPercent < 10:
+                                    self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, "pick up target package")
+                                    _log.info('pickup blocked: robot#%d batt=%.1f%% too low for pkg#%d',
+                                              self.robots[i].robotNumber, self.robots[i].batteryPercent, packageNumber)
+                                    continue
                                 #print('--- pick up target package ---')
                                 #print('- self.packagesMoveList: {}'.format(str(self.packagesMoveList)))
                                 #print('- self.packagesMovingList: {}'.format(str(self.packagesMovingList)))
@@ -1107,6 +1573,8 @@ class Warehouse:
                                 self.robots[i].carrying = packageNumber
                                 self.packages[packageIndex].status = "carried"
                                 self.packages[packageIndex].carrier = robotNumber
+                                _log.debug('pickup: robot#%d picked pkg#%d at %s -> dropoff %s',
+                                           robotNumber, packageNumber, list(currentLocation), list(packageLocationTarget))
                                 #print('- self.packagesMoveList: {}'.format(str(self.packagesMoveList)))
                                 #print('- self.packagesMovingList: {}'.format(str(self.packagesMovingList)))
                                 #print('- self.robotsTaskAssignmentList: {}'.format(str(self.robotsTaskAssignmentList)))
@@ -1115,9 +1583,14 @@ class Warehouse:
                                 #print('- actionQueue: {}'.format(str(self.robots[i].actionQueue)))
 
                     elif (self.robots[i].actionQueue[0][0] == currentLocation) and (self.robots[i].actionQueue[0][1] == "drop off target package"):
-                        packageIndex = [y for y, x in enumerate(self.packages) if x.xyLocationTarget == currentLocation]
-                        if packageIndex:
-                            packageIndex = packageIndex[0]
+                        # Find the package being dropped off by robot.carrying, not by
+                        # xyLocationTarget — an idle package previously dropped at the
+                        # same export cell may share the same target coord and would
+                        # be found first by a location search.
+                        _carrying = self.robots[i].carrying
+                        packageIndex = next((y for y, x in enumerate(self.packages)
+                                            if x.packageNumber == _carrying), None)
+                        if packageIndex is not None:
                             packageNumber = self.packages[packageIndex].packageNumber
                             packageLocationTarget = self.packages[packageIndex].xyLocationTarget
                             if (self.robots[i].status != "carried") and (self.packages[packageIndex].status == "carried"):
@@ -1131,6 +1604,9 @@ class Warehouse:
                                 self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, "drop off target package")
                                 self.robots[i].carrying = -1
                                 self.packagesMoveList, self.packagesMovingList, self.packages, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount = self.package_dropoff(packageNumber)
+                                _log.debug('dropoff: robot#%d dropped pkg#%d at %s  area=%s',
+                                           self.robots[i].robotNumber, packageNumber, list(currentLocation),
+                                           self.packages[next((y for y, x in enumerate(self.packages) if x.packageNumber == packageNumber), -1)].area if any(x.packageNumber == packageNumber for x in self.packages) else 'exported')
                                 #print('- self.packagesMoveList: {}'.format(str(self.packagesMoveList)))
                                 #print('- self.packagesMovingList: {}'.format(str(self.packagesMovingList)))
                                 #print('- self.robotsTaskAssignmentList: {}'.format(str(self.robotsTaskAssignmentList)))
@@ -1215,7 +1691,11 @@ class Warehouse:
     
     def robot_pop_task(self, robotIndex, robotActionToPop):
         robotNumber = self.robots[robotIndex].robotNumber
-        robotActionIndex = [i2 for i2, x in enumerate(self.robots[robotIndex].actionQueue) if robotActionToPop in x][0]
+        _matches = [i2 for i2, x in enumerate(self.robots[robotIndex].actionQueue) if robotActionToPop in x]
+        if not _matches:
+            # Action not found — queue is already in the correct state; nothing to pop.
+            return self.robots[robotIndex], self.robotsTaskAssignmentList, self.robotsLog
+        robotActionIndex = _matches[0]
         self.robots[robotIndex].actionQueue.pop(robotActionIndex)
         robotTaskAssignmentIndex = [y for y, x in enumerate(self.robotsTaskAssignmentList) if x[0] == robotNumber][0]
         #print('- robotTaskAssignmentIndex: {}'.format(robotTaskAssignmentIndex))
@@ -1239,7 +1719,11 @@ class Warehouse:
         
     def robot_replace_task(self, robotIndex, robotActionToPop, robotNewLocation, robotNewAction):
         robotNumber = self.robots[robotIndex].robotNumber
-        robotActionIndex = [i2 for i2, x in enumerate(self.robots[robotIndex].actionQueue) if robotActionToPop in x][0]
+        _matches = [i2 for i2, x in enumerate(self.robots[robotIndex].actionQueue) if robotActionToPop in x]
+        if not _matches:
+            # Action not found — nothing to replace; caller should handle this case.
+            return self.robots[robotIndex], self.robotsTaskAssignmentList, self.robotsLog
+        robotActionIndex = _matches[0]
         self.robots[robotIndex].actionQueue.pop(robotActionIndex)
         robotTaskAssignmentIndex = [y for y, x in enumerate(self.robotsTaskAssignmentList) if x[0] == robotNumber][0]
         self.robotsTaskAssignmentList[robotTaskAssignmentIndex][1] -= 1

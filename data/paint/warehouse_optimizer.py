@@ -37,13 +37,17 @@ class WarehouseOptimizer:
 
     # ── Per-tick entry point ───────────────────────────────────────────
 
-    def step(self, wh):
+    def step(self, wh, heatmap_slow=None):
         """Called once per sim tick.  Forwards to all registered strategies.
 
         Disabled strategies still receive the call so they can advance internal
         counters (e.g. warmup ticker) — they return immediately without mutating
         warehouse state.  Budget is calculated against the active-strategy count
         so enabling a strategy gives it the correct share of the global cap.
+
+        Args:
+            heatmap_slow: float32 (H×W) slow-decay traffic heatmap (~5 min half-life).
+                          Passed through to strategies for future road-logic use.
         """
         active   = [s for s in self.strategies if s.enabled]
         n_active = max(len(active), 1)
@@ -51,7 +55,7 @@ class WarehouseOptimizer:
             per_eval = max(1, (self.MAX_CELLS_PER_SEC * s.EVAL_INTERVAL)
                               // max(self._tick_rate, 1)
                               // n_active)
-            s.step(wh, per_eval)
+            s.step(wh, per_eval, heatmap_slow=heatmap_slow)
 
     # ── Reset (hot-reload) ─────────────────────────────────────────────
 
