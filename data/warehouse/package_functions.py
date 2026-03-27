@@ -31,11 +31,21 @@ class Package_Functions:
         return packagesRollingCount, packagesInImportCount, packagesInWarehouseCount, packages, packagesLog
 
     @staticmethod
-    def try_packageTargetLocation(zoneMap, zoneId, packagesInWarehouse, packageTargetsInWarehouse, chargersInWarehouse):
+    def try_packageTargetLocation(zoneMap, zoneId, packagesInWarehouse, packageTargetsInWarehouse, chargersInWarehouse, reference_xy=None, mode='random'):
         """Find a free cell in *zoneId* that has no package, planned target, or charger.
+
+        Modes:
+            'random'    — pick a random free cell (even spread, avoids clustering)
+            'nearest'   — pick the closest free cell to reference_xy (min travel)
+            'zone_edge' — pick the closest free cell adjacent to a different zone
+                          (pre-stages for next pipeline move); falls back to nearest
 
         Returns (True, [x, y]) on success or (False, []) if the zone is full.
         """
+        mode = str(mode).strip().lower()
+        if mode not in ('random', 'nearest', 'zone_edge'):
+            mode = 'random'
+
         candidates = np.argwhere(
             (zoneMap == zoneId) &
             (packagesInWarehouse == 0) &
@@ -44,7 +54,36 @@ class Package_Functions:
         )
         if len(candidates) == 0:
             return False, []
-        idx = random.randint(0, len(candidates) - 1)
+
+        if mode == 'nearest' and reference_xy is not None:
+            rx, ry = reference_xy
+            dists = (candidates[:, 1] - rx) ** 2 + (candidates[:, 0] - ry) ** 2
+            idx = int(np.argmin(dists))
+        elif mode == 'zone_edge' and reference_xy is not None:
+            # Filter to candidates 4-adjacent to a cell of a different zone
+            h, w = zoneMap.shape
+            edge_mask = np.zeros(len(candidates), dtype=bool)
+            for ci in range(len(candidates)):
+                cy, cx = candidates[ci]
+                for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    ny, nx = cy + dy, cx + dx
+                    if 0 <= ny < h and 0 <= nx < w and zoneMap[ny, nx] != zoneId and zoneMap[ny, nx] != 0:
+                        edge_mask[ci] = True
+                        break
+            edge_cands = candidates[edge_mask]
+            if len(edge_cands) > 0:
+                rx, ry = reference_xy
+                dists = (edge_cands[:, 1] - rx) ** 2 + (edge_cands[:, 0] - ry) ** 2
+                idx_e = int(np.argmin(dists))
+                y, x = edge_cands[idx_e]
+                return True, [int(x), int(y)]
+            # Fallback to nearest
+            rx, ry = reference_xy
+            dists = (candidates[:, 1] - rx) ** 2 + (candidates[:, 0] - ry) ** 2
+            idx = int(np.argmin(dists))
+        else:
+            idx = random.randint(0, len(candidates) - 1)
+
         y, x = candidates[idx]
         return True, [int(x), int(y)]
 

@@ -19,7 +19,7 @@ class PaintHandler:
         Right-drag                — erase (zone 0 / neutral)
         Zone buttons (bottom)     — select zone / erase
         Brush buttons (right top) — select brush size (1 / 3 / 5)
-        Strategy toggles (right bottom) — enable/disable optimizer strategies
+        Strategy toggles (right strip) — enable/disable optimizer strategies
         Key L                     — hot-reload all map PNGs from disk
     """
 
@@ -224,7 +224,7 @@ class PaintHandler:
 
         Layout (within the zone_view_rect panel):
           Right  BRUSH_W px (top):    vertical brush size selectors — 1 / 3 / 5
-          Right  BRUSH_W px (bottom): strategy toggle buttons — e.g. AUTO
+                    Right  BRUSH_W px (bottom): strategy toggle buttons — e.g. AUTO
           Bottom BUTTON_H px (full):  zone / erase selectors  — CLR|IMP|STO|EXP
 
         Args:
@@ -239,7 +239,7 @@ class PaintHandler:
         btn_y0  = vy0 + map_h             # top of zone button strip
         brush_x = vx0 + map_w             # left of brush strip
 
-        # Slot layout for right strip: brush sizes top, strategy toggles bottom
+        # Slot layout for right strip: brush sizes top, strategy toggles bottom.
         strategies = self.optimizer.strategies if self.optimizer else []
         n_b   = len(self._BRUSH_SIZES)
         n_s   = len(strategies)

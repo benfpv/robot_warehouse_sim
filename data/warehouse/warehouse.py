@@ -33,6 +33,10 @@ if not _log.handlers:
     _log.propagate = False
 
 class Warehouse:
+    _POWER_POLICY_MODES = ('eco', 'balanced', 'performance')
+    _FLOW_POLICY_MODES = ('steady', 'balanced', 'throughput')
+    _PKG_TARGET_MODES = ('random', 'nearest', 'zone_edge')
+
     def __init__(self,
                     # Window Resolution, Window Center
                     windowRes = [], windowBackgroundColour = [], windowCenter = [], windowArray = [], itemsList = [], addressesList = [],
@@ -153,10 +157,22 @@ class Warehouse:
                                 if self._robotSpawnMap_override is not None
                                 else self.warehousePerimeterCoordinates)
         self.warehouse_data = Warehouse_Data(self.dataMaxLength)
-        # Adaptive power management state (recomputed every tick)
-        self._charger_pressure = 0.0    # ratio of busy chargers (0.0-1.0)
+        # Adaptive Power Policy thresholds
+        self._power_policy_mode = 'balanced'
+        self._limp_mode_batt_pct = 20.0
+        self._work_min_batt_pct = 20.0
+        self._critical_batt_pct = 8.0
+        self._charge_threshold_base = 30.0
+        self._charge_threshold_span = 20.0  # max threshold = base + span
+
+        # Adaptive Power Policy state (smoothed every tick)
+        self._power_policy_name = 'Power Policy'
+        self._power_policy_alpha = 0.05
+        self._charger_pressure_raw = 0.0
+        self._charger_pressure = 0.0    # smoothed ratio of busy chargers (0.0-1.0)
         self._avg_fleet_battery = 100.0
-        self._charge_threshold = 30     # dynamic, recomputed in checkBattery
+        self._charge_threshold_target = self._charge_threshold_base
+        self._charge_threshold = self._charge_threshold_base   # smoothed dynamic charge threshold
 
         # ── Flow-control metrics ──
         self._flow_export_times = []     # recent delivery durations (seconds)
@@ -164,9 +180,89 @@ class Warehouse:
         self._flow_avg_deadline = 0.0    # EMA of time-to-deadline at spawn (seconds)
         self._flow_throughput   = 0.0    # exports per second (EMA)
         self._flow_last_export_t = time.time()
+        self._flow_policy_mode = 'balanced'
         self._flow_import_cap   = int(self.packagesMaxQuantity * 0.5)  # start at target occupancy
         self._flow_ema_alpha    = 0.02   # smoothing factor for EMAs
         self._flow_target_occ   = 0.50   # target warehouse occupancy (50%)
+
+        # Package target selection mode: 'random', 'nearest', or 'zone_edge'
+        self._pkg_target_mode = 'nearest'
+
+    def set_power_policy_mode(self, mode):
+        """Override adaptive power policy profile from UI.
+
+        Modes:
+            eco        - conservative charging and stronger limp behavior
+            balanced   - default profile
+            performance- lower buffers for higher utilization
+        """
+        mode = str(mode).strip().lower()
+        profiles = {
+            'eco': {
+                'limp': 25.0,
+                'work': 25.0,
+                'critical': 10.0,
+                'base': 35.0,
+                'span': 15.0,
+                'alpha': 0.04,
+            },
+            'balanced': {
+                'limp': 20.0,
+                'work': 20.0,
+                'critical': 8.0,
+                'base': 30.0,
+                'span': 20.0,
+                'alpha': 0.05,
+            },
+            'performance': {
+                'limp': 15.0,
+                'work': 15.0,
+                'critical': 6.0,
+                'base': 27.0,
+                'span': 13.0,
+                'alpha': 0.06,
+            },
+        }
+        cfg = profiles.get(mode)
+        if not cfg:
+            return False
+        self._power_policy_mode = mode
+        self._limp_mode_batt_pct = cfg['limp']
+        self._work_min_batt_pct = cfg['work']
+        self._critical_batt_pct = cfg['critical']
+        self._charge_threshold_base = cfg['base']
+        self._charge_threshold_span = cfg['span']
+        self._power_policy_alpha = cfg['alpha']
+        self._charge_threshold_target = self._charge_threshold_base + self._charge_threshold_span * self._charger_pressure_raw
+        self._charge_threshold = np.clip(self._charge_threshold, self._charge_threshold_base, self._charge_threshold_base + self._charge_threshold_span)
+        return True
+
+    def set_flow_policy_mode(self, mode):
+        """Override flow-control policy profile from UI."""
+        mode = str(mode).strip().lower()
+        profiles = {
+            'steady': {'target_occ': 0.45, 'alpha': 0.03},
+            'balanced': {'target_occ': 0.50, 'alpha': 0.02},
+            'throughput': {'target_occ': 0.60, 'alpha': 0.015},
+        }
+        cfg = profiles.get(mode)
+        if not cfg:
+            return False
+        self._flow_policy_mode = mode
+        self._flow_target_occ = cfg['target_occ']
+        self._flow_ema_alpha = cfg['alpha']
+        return True
+
+    def set_package_target_mode(self, mode):
+        """Override package target placement mode from UI.
+
+        Supported values: random, nearest, zone_edge.
+        """
+        mode = str(mode).strip().lower()
+        if mode not in self._PKG_TARGET_MODES:
+            return False
+        self._pkg_target_mode = mode
+        return True
     
     def update_warehouse(self):
         #self.printDebugInfo()
@@ -201,7 +297,7 @@ class Warehouse:
             _log.info(
                 'tick=%d  pkgs=%d (imp=%d sto=%d exp=%d)  moveList=%d  movingList=%d  '
                 'overdue=%d  carried=%d  planned=%d  exported=%d  '
-                'robots: idle=%d charging=%d  avg_drain=%.3f  pressure=%.2f  thresh=%.0f%%  '
+                'robots: idle=%d charging=%d  avg_drain=%.3f  pressure=%.2f raw=%.2f  thresh=%.0f/%.0f%%  '
                 'flow: cap=%d/%d  delivery=%.0fs  throughput=%.2f/s',
                 self.warehouseLoopCount,
                 len(self.packages), self.packagesInImportCount,
@@ -210,7 +306,8 @@ class Warehouse:
                 _n_overdue, _n_carried, _n_planned,
                 self.packageExportRollingCount,
                 _n_idle_robots, _n_charging, _avg_drain,
-                self._charger_pressure, self._charge_threshold,
+                self._charger_pressure, self._charger_pressure_raw,
+                self._charge_threshold, self._charge_threshold_target,
                 self._flow_import_cap, self.packagesMaxQuantity,
                 self._flow_avg_delivery, self._flow_throughput)
         self.warehouseLoopCount += 1
@@ -799,7 +896,7 @@ class Warehouse:
         # execute soon.  available_robots * 2 gives a one-task pipeline buffer.
         available_robots = sum(1 for r in self.robots
                                if r.status not in ('charging', 'move to charging station')
-                               and r.batteryPercent >= 10)
+                               and r.batteryPercent >= self._work_min_batt_pct)
         effective_move_cap = max(available_robots * 2, 4)  # floor of 4 to avoid stalling
         effective_move_cap = min(effective_move_cap, self.packagesMaxMoveQuantity)
 
@@ -909,10 +1006,12 @@ class Warehouse:
                     movePackage = False
                     ttd = self.packages[i].timeToDeadline.total_seconds()
                     is_urgent = ttd <= _EXPORT_URGENCY_SECS  # overdue or near-deadline
+                    _ref_xy = self.packages[i].xyLocation
+                    _mode = self._pkg_target_mode
                     # Try to store package in Export (only if urgent)
                     if (movePackage == False) and (export_headroom > 0) and is_urgent:
                         if (packageArea != 'export') and (packageAreaTarget != 'export'):
-                            movePackage, xyLocation = Package_Functions.try_packageTargetLocation(self.zoneMap, ZONE_EXPORT, self.packagesInWarehouse, self.packageTargetsInWarehouse, self.chargersInWarehouse)
+                            movePackage, xyLocation = Package_Functions.try_packageTargetLocation(self.zoneMap, ZONE_EXPORT, self.packagesInWarehouse, self.packageTargetsInWarehouse, self.chargersInWarehouse, reference_xy=_ref_xy, mode=_mode)
                             if (movePackage == True):
                                 self.packages[i].areaTarget = 'export'
                                 self.packagesPlannedInExportCount += 1
@@ -920,7 +1019,7 @@ class Warehouse:
                     # Try to store package in Storage
                     if (movePackage == False) and (storage_headroom > 0):
                         if (packageArea != "storage") and (packageAreaTarget != 'storage'):
-                            movePackage, xyLocation = Package_Functions.try_packageTargetLocation(self.zoneMap, ZONE_STORAGE, self.packagesInWarehouse, self.packageTargetsInWarehouse, self.chargersInWarehouse)
+                            movePackage, xyLocation = Package_Functions.try_packageTargetLocation(self.zoneMap, ZONE_STORAGE, self.packagesInWarehouse, self.packageTargetsInWarehouse, self.chargersInWarehouse, reference_xy=_ref_xy, mode=_mode)
                             if (movePackage == True):
                                 self.packages[i].areaTarget = 'storage'
                                 self.packagesPlannedInStorageCount += 1
@@ -928,7 +1027,7 @@ class Warehouse:
                     # Fallback: non-urgent package but storage full — try export anyway
                     if (movePackage == False) and (export_headroom > 0) and not is_urgent:
                         if (packageArea != 'export') and (packageAreaTarget != 'export'):
-                            movePackage, xyLocation = Package_Functions.try_packageTargetLocation(self.zoneMap, ZONE_EXPORT, self.packagesInWarehouse, self.packageTargetsInWarehouse, self.chargersInWarehouse)
+                            movePackage, xyLocation = Package_Functions.try_packageTargetLocation(self.zoneMap, ZONE_EXPORT, self.packagesInWarehouse, self.packageTargetsInWarehouse, self.chargersInWarehouse, reference_xy=_ref_xy, mode=_mode)
                             if (movePackage == True):
                                 self.packages[i].areaTarget = 'export'
                                 self.packagesPlannedInExportCount += 1
@@ -977,7 +1076,8 @@ class Warehouse:
                     export_headroom += 1
                     movePackage, xyLocation = Package_Functions.try_packageTargetLocation(
                         self.zoneMap, ZONE_EXPORT, self.packagesInWarehouse,
-                        self.packageTargetsInWarehouse, self.chargersInWarehouse)
+                        self.packageTargetsInWarehouse, self.chargersInWarehouse,
+                        reference_xy=p.xyLocation, mode=self._pkg_target_mode)
                     if movePackage:
                         p.areaTarget = 'export'
                         p.xyLocationTarget = xyLocation.copy()
@@ -1166,7 +1266,7 @@ class Warehouse:
         DRAIN_MOVING   = 1.0   # baseline motor cost
         DRAIN_CARRYING = 1.5   # extra load while transporting a package
         DRAIN_CHARGING = 0.0   # no drain while docked at charger
-        # Fleet-aware eco factor: when chargers are scarce, robots conserve energy
+        # Fleet-aware Power Policy: when chargers are scarce, robots conserve energy
         # Pressure > 0.5 starts reducing drain; at pressure 1.0, drain cut by 30%
         _eco = 1.0 - 0.3 * max(0.0, self._charger_pressure - 0.5) * 2.0
         for i in range(len(self.robots)):
@@ -1196,16 +1296,19 @@ class Warehouse:
             if charger.status == "charging planned" and tuple(charger.xyLocation) not in actively_claimed:
                 charger.status = "idle"
         # --- End reconciliation ---
-        # --- Adaptive power metrics ---
+        # --- Adaptive Power Policy metrics ---
         _n_chargers = max(len(self.chargers), 1)
         _n_busy = sum(1 for c in self.chargers if c.status != 'idle')
-        self._charger_pressure = _n_busy / _n_chargers
+        self._charger_pressure_raw = _n_busy / _n_chargers
+        _alpha = self._power_policy_alpha
+        self._charger_pressure += (_alpha * (self._charger_pressure_raw - self._charger_pressure))
         self._avg_fleet_battery = (sum(r.batteryPercent for r in self.robots)
                                    / max(len(self.robots), 1))
-        # Dynamic charge threshold: 25% base, scales up with charger pressure
-        # At pressure 0: 25% | 0.5: 37.5% | 1.0: 50%
-        self._charge_threshold = 25 + 25 * self._charger_pressure
-        # --- End adaptive metrics ---
+        # Dynamic charge threshold: base + pressure-scaled span.
+        # The active threshold follows the target smoothly to avoid abrupt policy flips.
+        self._charge_threshold_target = self._charge_threshold_base + self._charge_threshold_span * self._charger_pressure_raw
+        self._charge_threshold += (_alpha * (self._charge_threshold_target - self._charge_threshold))
+        # --- End Adaptive Power Policy metrics ---
         for i in range(len(self.robots)):
             if self.robots[i].batteryPercent <= self._charge_threshold:
                 if self.robots[i].status != "charging":
@@ -1265,7 +1368,7 @@ class Warehouse:
                     _log.debug('opportunistic top-off: robot#%d batt=%.1f%% pressure=%.2f -> charger %s',
                                self.robots[i].robotNumber, self.robots[i].batteryPercent,
                                self._charger_pressure, _csl)
-            if self.robots[i].batteryPercent <= 5:
+            if self.robots[i].batteryPercent <= self._critical_batt_pct:
                 # Battery critically low — emergency-drop carried package so it
                 # doesn't get permanently stuck on a dying robot.
                 if self.robots[i].carrying != -1:
@@ -1348,8 +1451,8 @@ class Warehouse:
                             if (robotTaskQuantity < self.robotsTaskAssignmentMaxQuantity):
                                 robotNumberInList = self.robotsTaskAssignmentList[0][0]
                                 robotIndex = [y for y, x in enumerate(self.robots) if x.robotNumber == robotNumberInList][0]
-                                # Battery saving mode: don't assign new work to robots below 10%
-                                if self.robots[robotIndex].batteryPercent < 10:
+                                # Power Policy: don't assign new work below work-safe battery floor.
+                                if self.robots[robotIndex].batteryPercent < self._work_min_batt_pct:
                                     continue
                                 # Trip feasibility: estimate if robot can complete round trip
                                 _rx, _ry = self.robots[robotIndex].xyLocation
@@ -1400,30 +1503,39 @@ class Warehouse:
 
     def update_robots_xyLocation(self):
         for i in range(len(self.robots)):
-            currentLocation = self.robots[i].xyLocation
-            targetLocation = self.robots[i].xyLocationTarget
+            robot = self.robots[i]
+            currentLocation = robot.xyLocation
+            targetLocation = robot.xyLocationTarget
             if (currentLocation != targetLocation):
-                # Battery saving mode: skip every other movement tick at <10%
-                if self.robots[i].batteryPercent < 10:
-                    if not getattr(self.robots[i], '_lowbatt_skip', False):
-                        self.robots[i]._lowbatt_skip = True
-                        continue
-                    else:
-                        self.robots[i]._lowbatt_skip = False
+                # Limp mode: below configured battery threshold, modulate speed.
+                # This keeps motion readable while still making low-battery robots sluggish.
+                _limp_threshold = self._limp_mode_batt_pct
+                if robot.batteryPercent < _limp_threshold:
+                    _limp_speed = 0.25 + 0.75 * max(robot.batteryPercent, 0) / max(_limp_threshold, 1.0)
+                else:
+                    _limp_speed = 1.0
+                robot.velocity = round(_limp_speed, 2)
+                robot.movementProgress += _limp_speed
+                if robot.movementProgress < 1.0:
+                    continue
+                robot.movementProgress -= 1.0
                 #print('- robot#{}: currentLoc: {}. targetLoc: {}'.format(i, currentLocation, targetLocation))
-                diffX = self.robots[i].xyLocationTarget[0] - self.robots[i].xyLocation[0]
-                diffY = self.robots[i].xyLocationTarget[1] - self.robots[i].xyLocation[1]
-                self.robots[i].xyLocationDiff = [diffX, diffY]
+                diffX = robot.xyLocationTarget[0] - robot.xyLocation[0]
+                diffY = robot.xyLocationTarget[1] - robot.xyLocation[1]
+                robot.xyLocationDiff = [diffX, diffY]
                 #print('- robot#{}: diffLocation: {}'.format(i, self.robots[i].xyLocationDiff))
                 degrees = round(math.degrees(math.atan2(diffY, diffX)))
                 #print('- degrees: {}'.format(degrees))
-                self.robots[i].degrees = degrees
+                robot.degrees = degrees
                 cardinal = Functions.find_cardinal(degrees)
-                self.robots[i].cardinal = cardinal
+                robot.cardinal = cardinal
                 #print('- cardinal: {}'.format(self.robots[i].cardinal))
                 xyMovementTemp = Functions.find_location_from_cardinal(cardinal)
-                self.robots[i].xyLocation[0] += xyMovementTemp[0]
-                self.robots[i].xyLocation[1] += xyMovementTemp[1]
+                robot.xyLocation[0] += xyMovementTemp[0]
+                robot.xyLocation[1] += xyMovementTemp[1]
+            else:
+                robot.velocity = 0.0
+                robot.movementProgress = 0.0
         return self.robots
     
     def update_robots_charging(self):
@@ -1557,7 +1669,7 @@ class Warehouse:
                             packageLocationTarget = self.packages[packageIndex].xyLocationTarget
                             if (self.robots[i].status != "carried") and (self.packages[packageIndex].status != "carried"):
                                 # Block pickup if battery too low — robot can't reliably deliver
-                                if self.robots[i].batteryPercent < 10:
+                                if self.robots[i].batteryPercent < self._work_min_batt_pct:
                                     self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, "pick up target package")
                                     _log.info('pickup blocked: robot#%d batt=%.1f%% too low for pkg#%d',
                                               self.robots[i].robotNumber, self.robots[i].batteryPercent, packageNumber)

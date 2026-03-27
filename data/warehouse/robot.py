@@ -24,6 +24,8 @@ class Robot:
         self.carrier = carrier
         self.createdAt = time.time()
         self.batteryDrainMultiplier = 1.0
+        # Accumulates fractional movement in limp mode until a full grid step is earned.
+        self.movementProgress = 0.0
 
 class Robot_Log:
     def __init__(self, action, datetimeNow):

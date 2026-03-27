@@ -21,6 +21,50 @@ from data.paint.warehouse_optimizer import WarehouseOptimizer
 from data.paint.zone_strategy import ZoneStrategy
 
 class MainGame:
+    _POWER_POLICY_MODES = ['eco', 'balanced', 'performance']
+    _POWER_POLICY_STYLE = {
+        'eco': {'label': 'ECO', 'bg': (20, 30, 24), 'edge': (80, 180, 120), 'text': (140, 220, 170)},
+        'balanced': {'label': 'BAL', 'bg': (22, 24, 30), 'edge': (120, 140, 220), 'text': (180, 190, 250)},
+        'performance': {'label': 'PERF', 'bg': (30, 24, 22), 'edge': (220, 140, 100), 'text': (255, 210, 170)},
+    }
+    _POWER_POLICY_REASON = {
+        'eco': 'higher buffers, safer charging behavior',
+        'balanced': 'balanced safety and throughput',
+        'performance': 'lower buffers, higher utilization',
+    }
+    _POWER_POLICY_HINT = {
+        'eco': 'safe charge',
+        'balanced': 'balanced',
+        'performance': 'high util',
+    }
+    _FLOW_POLICY_MODES = ['steady', 'balanced', 'throughput']
+    _FLOW_POLICY_STYLE = {
+        'steady': {'label': 'STDY', 'bg': (20, 30, 24), 'edge': (80, 180, 120), 'text': (140, 220, 170)},
+        'balanced': {'label': 'BAL', 'bg': (22, 24, 30), 'edge': (120, 140, 220), 'text': (180, 190, 250)},
+        'throughput': {'label': 'THRU', 'bg': (30, 24, 22), 'edge': (220, 140, 100), 'text': (255, 210, 170)},
+    }
+    _FLOW_POLICY_REASON = {
+        'steady': 'lower occupancy target for stability',
+        'balanced': 'balanced occupancy target',
+        'throughput': 'higher occupancy target for throughput',
+    }
+    _FLOW_POLICY_HINT = {
+        'steady': 'stable queue',
+        'balanced': 'balanced',
+        'throughput': 'max throughput',
+    }
+    _PKG_TARGET_MODES = ['random', 'nearest', 'zone_edge']
+    _PKG_TARGET_STYLE = {
+        'random': {'label': 'RND', 'hint': 'spread', 'bg': (18, 22, 24), 'edge': (48, 58, 66), 'text': (110, 120, 128)},
+        'nearest': {'label': 'NEAR', 'hint': 'min dist', 'bg': (20, 30, 40), 'edge': (40, 160, 220), 'text': (100, 210, 255)},
+        'zone_edge': {'label': 'EDGE', 'hint': 'pipeline', 'bg': (22, 30, 25), 'edge': (80, 180, 180), 'text': (170, 230, 230)},
+    }
+    _PKG_TARGET_REASON = {
+        'random': 'spread load and avoid clustering',
+        'nearest': 'minimize immediate travel distance',
+        'zone_edge': 'stage packages for the next pipeline handoff',
+    }
+
     def __init__(self):
         print("--- MainGame Init ---")
         self.timeStart = int(time.time())
@@ -149,8 +193,114 @@ class MainGame:
     # ── Mouse callback ──────────────────────────────────────────────────
 
     def _on_mouse(self, event, px, py, flags, param):
-        """Composite cv2 mouse callback. Delegates all events to PaintHandler."""
+        """Composite cv2 mouse callback. Handles dashboard controls, then delegates."""
+        if self._handle_power_policy_click(event, px, py):
+            return
+        if self._handle_flow_policy_click(event, px, py):
+            return
+        if self._handle_pkg_target_mode_click(event, px, py):
+            return
         self.paint_handler.on_mouse(event, px, py, flags, param)
+
+    def _set_power_policy_mode(self, mode):
+        if not self.warehouse.set_power_policy_mode(mode):
+            return
+        print('[main] Power Policy -> {} ({})'.format(
+            mode, self._POWER_POLICY_REASON[mode]))
+
+    def _set_flow_policy_mode(self, mode):
+        if not self.warehouse.set_flow_policy_mode(mode):
+            return
+        print('[main] Flow Policy -> {} ({})'.format(
+            mode, self._FLOW_POLICY_REASON[mode]))
+
+    def _power_policy_button_layout(self):
+        mh = self.warehouse_windowRes[1]
+        cw = self.composite_windowRes[0]
+        col_w = cw // 4
+        pad_x = 4
+        gap = 3
+        btn_h = 11
+        btn_w = 34
+        total_w = btn_w * 3 + gap * 2
+        x0 = col_w * 2 - pad_x - total_w
+        y0 = mh + 3
+        layout = []
+        for i, mode in enumerate(self._POWER_POLICY_MODES):
+            bx0 = x0 + i * (btn_w + gap)
+            bx1 = bx0 + btn_w
+            layout.append((mode, bx0, y0, bx1, y0 + btn_h))
+        return layout
+
+    def _flow_policy_button_layout(self):
+        mh = self.warehouse_windowRes[1]
+        cw = self.composite_windowRes[0]
+        col_w = cw // 4
+        pad_x = 4
+        gap = 3
+        btn_h = 11
+        btn_w = 34
+        total_w = btn_w * 3 + gap * 2
+        x0 = col_w * 3 - pad_x - total_w
+        y0 = mh + 3
+        layout = []
+        for i, mode in enumerate(self._FLOW_POLICY_MODES):
+            bx0 = x0 + i * (btn_w + gap)
+            bx1 = bx0 + btn_w
+            layout.append((mode, bx0, y0, bx1, y0 + btn_h))
+        return layout
+
+    def _handle_power_policy_click(self, event, px, py):
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return False
+        for mode, bx0, by0, bx1, by1 in self._power_policy_button_layout():
+            if bx0 <= px < bx1 and by0 <= py < by1:
+                self._set_power_policy_mode(mode)
+                return True
+        return False
+
+    def _handle_flow_policy_click(self, event, px, py):
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return False
+        for mode, bx0, by0, bx1, by1 in self._flow_policy_button_layout():
+            if bx0 <= px < bx1 and by0 <= py < by1:
+                self._set_flow_policy_mode(mode)
+                return True
+        return False
+
+    def _set_pkg_target_mode(self, mode):
+        if not self.warehouse.set_package_target_mode(mode):
+            return
+        mode = getattr(self.warehouse, '_pkg_target_mode', mode)
+        print('[main] Package target mode -> {} ({})'.format(
+            mode, self._PKG_TARGET_REASON.get(mode, 'user override')))
+
+    def _pkg_target_button_layout(self):
+        mh = self.warehouse_windowRes[1]
+        cw = self.composite_windowRes[0]
+        col_w = cw // 4
+        pad_x = 4
+        gap = 3
+        btn_h = 11
+        btn_w = 38
+        total_w = btn_w * 3 + gap * 2
+        x0 = cw - pad_x - total_w
+        y0 = mh + 3
+        layout = []
+        for i, mode in enumerate(self._PKG_TARGET_MODES):
+            bx0 = x0 + i * (btn_w + gap)
+            bx1 = bx0 + btn_w
+            layout.append((mode, bx0, y0, bx1, y0 + btn_h))
+        return layout
+
+    def _handle_pkg_target_mode_click(self, event, px, py):
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return False
+        for mode, bx0, by0, bx1, by1 in self._pkg_target_button_layout():
+            if bx0 <= px < bx1 and by0 <= py < by1:
+                self._set_pkg_target_mode(mode)
+                return True
+        return False
 
     # ── Formatting helpers ──────────────────────────────────────────────
 
@@ -424,10 +574,17 @@ class MainGame:
         # battery picture that the single avg:XX% stat cannot.
         _fb_img   = np.zeros((_FB_H, sw, 3), dtype=np.uint8)
         _fb_font  = cv2.FONT_HERSHEY_SIMPLEX
-        _fb_chart_top = 14        # px reserved at top for title overlay
+        _fb_chart_top = 22        # px reserved for title overlay + policy row
         _fb_chart_bot = _FB_H
         _fb_chart_h   = _fb_chart_bot - _fb_chart_top
         _fb_bar_max_w = sw - 22   # right margin for optional % label on full bars
+        _fb_dyn_thresh = getattr(self.warehouse, '_charge_threshold', 30)
+        _fb_thresh_target = getattr(self.warehouse, '_charge_threshold_target', _fb_dyn_thresh)
+        _fb_thresh_x = int(_fb_dyn_thresh / 100.0 * _fb_bar_max_w)
+        _fb_pressure = getattr(self.warehouse, '_charger_pressure', 0.0)
+        _fb_pressure_raw = getattr(self.warehouse, '_charger_pressure_raw', _fb_pressure)
+        _fb_eco = 1.0 - 0.3 * max(0.0, _fb_pressure - 0.5) * 2.0
+        _fb_eco_save = max(0.0, (1.0 - _fb_eco) * 100.0)
         robots_sorted_batt = sorted(wh.robots, key=lambda r: r.batteryPercent)
         _fb_n = len(robots_sorted_batt)
         if _fb_n > 0:
@@ -439,6 +596,8 @@ class MainGame:
                     _fb_y1 = _fb_y0 + 1
                 # Track background
                 cv2.rectangle(_fb_img, (0, _fb_y0), (sw - 1, _fb_y1 - 1), (18, 18, 18), -1)
+                if _fb_thresh_x > 0:
+                    cv2.rectangle(_fb_img, (0, _fb_y0), (_fb_thresh_x, _fb_y1 - 1), (18, 10, 24), -1)
                 # Bar fill — colour by battery level
                 _fb_pct = _fr.batteryPercent
                 _fb_fill_w = max(1, int(_fb_pct / 100.0 * _fb_bar_max_w))
@@ -465,8 +624,8 @@ class MainGame:
                     _pip_half = max(_fb_bar_h // 2 - 1, 1)
                     cv2.rectangle(_fb_img, (_fb_ind_x, _fb_mid_y - _pip_half),
                                   (_fb_ind_x + 6, _fb_mid_y + _pip_half), (200, 200, 50), 1)
-                elif _fr.batteryPercent < 10:
-                    # Orange pip — battery saving mode
+                elif _fr.batteryPercent < getattr(self.warehouse, '_limp_mode_batt_pct', 20):
+                    # Orange pip — limp mode
                     _pip_half = max(_fb_bar_h // 2 - 1, 1)
                     cv2.rectangle(_fb_img, (_fb_ind_x, _fb_mid_y - _pip_half),
                                   (_fb_ind_x + 6, _fb_mid_y + _pip_half), (0, 140, 255), -1)
@@ -480,11 +639,26 @@ class MainGame:
             cv2.putText(_fb_img, "no robots", (8, _FB_H // 2), _fb_font, 0.32, (60, 60, 60), 1)
 
         # Charge threshold line — vertical dashed line at dynamic threshold across full chart height.
-        # Threshold adapts to charger pressure (25%-50%). Any bar below = robot seeking charger.
-        _fb_dyn_thresh = getattr(self.warehouse, '_charge_threshold', 30)
-        _fb_thresh_x = int(_fb_dyn_thresh / 100.0 * _fb_bar_max_w)
+        # Threshold adapts to charger pressure (30%-50%). Any bar below = robot seeking charger.
         for _dy in range(_fb_chart_top, _FB_H, 3):
             cv2.line(_fb_img, (_fb_thresh_x, _dy), (_fb_thresh_x, min(_dy + 1, _FB_H - 1)), (60, 60, 180), 1)
+        cv2.putText(_fb_img, 'T', (max(_fb_thresh_x - 2, 1), _fb_chart_top - 3), _fb_font, 0.22, (90, 110, 220), 1)
+
+        _fb_need = sum(1 for r in wh.robots if r.batteryPercent <= _fb_dyn_thresh)
+        _fb_busy = sum(1 for c in wh.chargers if c.status != 'idle')
+        _policy_y = _fb_chart_top - 4
+        _x = 2
+        for _txt, _col in [
+            ('PP', (120, 120, 120)),
+            (' T{:.0f}/{:.0f}'.format(_fb_dyn_thresh, _fb_thresh_target), (90, 110, 220)),
+            (' P{}/{}'.format(int(_fb_pressure * 100), int(_fb_pressure_raw * 100)), (60, 190, 190)),
+            (' E-{}'.format(int(round(_fb_eco_save))), (120, 200, 120) if _fb_eco_save > 0 else (80, 80, 80)),
+            (' N{}'.format(_fb_need), (60, 150, 230) if _fb_need > 0 else (80, 80, 80)),
+            (' C{}'.format(_fb_busy), (200, 200, 50) if _fb_busy > 0 else (80, 80, 80)),
+        ]:
+            cv2.putText(_fb_img, _txt, (_x, _policy_y), _fb_font, 0.22, _col, 1)
+            (_tw, _th), _ = cv2.getTextSize(_txt, _fb_font, 0.22, 1)
+            _x += _tw + 2
 
         # Mini legend in title row (right side): coloured squares + 1-char labels
         _lg_y = 4
@@ -647,6 +821,26 @@ class MainGame:
             _util_str = "---"
             _opt_str  = "---"
 
+        _pkg_target_mode = getattr(wh, '_pkg_target_mode', 'random')
+        _pkg_style = self._PKG_TARGET_STYLE.get(_pkg_target_mode, self._PKG_TARGET_STYLE['random'])
+        if _pkg_target_mode == 'nearest':
+            _target_str = 'nearest (min dist)'
+            _target_col = _pkg_style['text']
+        elif _pkg_target_mode == 'zone_edge':
+            _target_str = 'edge (pipeline)'
+            _target_col = _pkg_style['text']
+        else:
+            _target_str = 'random (spread)'
+            _target_col = _pkg_style['text']
+
+        _flow_mode = getattr(wh, '_flow_policy_mode', 'balanced')
+        _flow_style = self._FLOW_POLICY_STYLE.get(_flow_mode, self._FLOW_POLICY_STYLE['balanced'])
+        _flow_col = _flow_style['text']
+
+        _power_mode = getattr(wh, '_power_policy_mode', 'balanced')
+        _power_style = self._POWER_POLICY_STYLE.get(_power_mode, self._POWER_POLICY_STYLE['balanced'])
+        _power_col = _power_style['text']
+
         # Determine colour for optimizer lines based on state
         _opt_active  = _zs and _zs.enabled and _zs._total >= _zs.WARMUP_TICKS
         _util_col    = (80, 210, 180) if _opt_active else (120, 120, 120)   # teal / dim
@@ -664,6 +858,9 @@ class MainGame:
             ("export",   "{}/{} ({})".format(_n(wh.packagesInExportCount),  _n(wh.numberOfExportSlots),  _r("expzone")), None),
             ("util",     _util_str, _util_col),
             ("opt",      _opt_str,  _opt_col),
+            ("power",    _power_mode, _power_col),
+            ("flow",     _flow_mode, _flow_col),
+            ("target",   _target_str, _target_col),
         ]
         # (SIM STATS rendering moved to info panel column 3)
 
@@ -805,8 +1002,28 @@ class MainGame:
         # ────────────── CHARGERS ──────────────
         _nc = len(self.warehouse.chargers)
         _n_busy = sum(1 for c in self.warehouse.chargers if c.status != 'idle')
-        x = put("CHARGERS ({})  ".format(_nc), col_w + pad_x, _hdr_y, white)
-        put("status | fleet", x, _hdr_y, sec_col)
+        put("CHARGERS ({})".format(_nc), col_w + pad_x, _hdr_y, white)
+        _pp_mode = getattr(self.warehouse, '_power_policy_mode', 'balanced')
+        _pp_style = self._POWER_POLICY_STYLE.get(_pp_mode, self._POWER_POLICY_STYLE['balanced'])
+        for mode, bx0, by0, bx1, by1 in self._power_policy_button_layout():
+            style = self._POWER_POLICY_STYLE[mode]
+            active = (mode == _pp_mode)
+            composite[by0:by1, bx0:bx1] = style['bg'] if active else (18, 18, 18)
+            composite[by0:by1, bx0:bx0 + 1] = style['edge'] if active else (42, 42, 42)
+            composite[by0:by1, bx1 - 1:bx1] = style['edge'] if active else (42, 42, 42)
+            composite[by0:by0 + 1, bx0:bx1] = style['edge'] if active else (42, 42, 42)
+            composite[by1 - 1:by1, bx0:bx1] = style['edge'] if active else (42, 42, 42)
+            _label = style['label']
+            _fs_btn = 0.23
+            (_tw, _th), _ = cv2.getTextSize(_label, font, _fs_btn, 1)
+            _tx = bx0 + max((bx1 - bx0 - _tw) // 2, 1)
+            _ty = by0 + (by1 - by0 + _th) // 2
+            cv2.putText(composite, _label, (_tx, _ty), font, _fs_btn,
+                        style['text'] if active else (85, 85, 85), 1)
+        put("mode: {} ({})".format(_pp_mode.upper(), self._POWER_POLICY_HINT.get(_pp_mode, _pp_mode)),
+            col_w + pad_x, _data_start - 1, _pp_style['text'], max_x=col_w * 2)
+        _chg_data_start = _data_start + lh
+        _chg_div_y = _div_y + lh
 
         # Charger→robot object mapping for battery display
         _crmap_obj = {}
@@ -819,7 +1036,7 @@ class MainGame:
         _chargers_sorted = sorted(self.warehouse.chargers, key=lambda c: charger_priority.get(c.status, 3))
         for ci in range(min(_split, len(_chargers_sorted))):
             c = _chargers_sorted[ci]
-            y = _data_start + ci * lh
+            y = _chg_data_start + ci * lh
             if y >= mh + ph - 2: break
             x = col_w + pad_x
             x = put("C{} ".format(c.chargerNumber), x, y, tuple(c.colour))
@@ -839,8 +1056,8 @@ class MainGame:
         # If chargers don't fill 7 rows, show remaining chargers beyond 7
         for ci2 in range(_split, min(len(_chargers_sorted), _split * 2)):
             c = _chargers_sorted[ci2]
-            y = _data_start + ci2 * lh
-            if y >= _div_y: break
+            y = _chg_data_start + ci2 * lh
+            if y >= _chg_div_y: break
             x = col_w + pad_x
             x = put("C{} ".format(c.chargerNumber), x, y, tuple(c.colour))
             _st = c.status
@@ -857,12 +1074,14 @@ class MainGame:
                 put("{}%".format(_rb), x, y, batt_col(_rb), max_x=col_w * 2)
 
         # Divider
-        composite[_div_y:_div_y + 1, col_w:col_w * 2] = 40
+        composite[_chg_div_y:_chg_div_y + 1, col_w:col_w * 2] = 40
 
         # Bottom section: fleet & power summary
         _avg_batt  = sum(r.batteryPercent for r in self.warehouse.robots) / max(_nr, 1)
         _pressure  = getattr(self.warehouse, '_charger_pressure', 0.0)
+        _pressure_raw = getattr(self.warehouse, '_charger_pressure_raw', _pressure)
         _threshold = getattr(self.warehouse, '_charge_threshold', 30)
+        _threshold_target = getattr(self.warehouse, '_charge_threshold_target', _threshold)
         _n_idle_r   = sum(1 for r in self.warehouse.robots if r.status == 'idle')
         _n_chrging  = sum(1 for r in self.warehouse.robots if r.status == 'charging')
         _n_enroute  = sum(1 for r in self.warehouse.robots if r.status == 'move to charging station')
@@ -872,14 +1091,15 @@ class MainGame:
         _fleet_lines = [
             ("avg batt",   "{:.0f}%".format(_avg_batt),     batt_col(int(_avg_batt))),
             ("avg drain",  "{:.3f}/t".format(_avg_drain),    dim),
-            ("pressure",   "{:.0f}%".format(_pressure * 100), (50, 200, 200) if _pressure > 0.5 else gray),
-            ("threshold",  "{:.0f}%".format(_threshold),     gray),
+            ("policy",     "Power/{}".format(getattr(self.warehouse, '_power_policy_mode', 'balanced')[:4]), _pp_style['text']),
+            ("pressure",   "{:.0f}/{:.0f}%".format(_pressure * 100, _pressure_raw * 100), (50, 200, 200) if _pressure > 0.5 else gray),
+            ("threshold",  "{:.0f}/{:.0f}%".format(_threshold, _threshold_target), gray),
             ("working",    str(_n_working),                  (80, 220, 150)),
             ("charging",   "{} + {} en-rt".format(_n_chrging, _n_enroute), (50, 200, 200)),
             ("idle",       str(_n_idle_r),                   (75, 75, 75)),
         ]
         for fi, (fl, fv, fc) in enumerate(_fleet_lines):
-            y = _div_y + 8 + fi * lh
+            y = _chg_div_y + 8 + fi * lh
             if y >= mh + ph - 2: break
             x = col_w + pad_x
             x = put("{}: ".format(fl), x, y, sec_col)
@@ -888,13 +1108,32 @@ class MainGame:
         # ────────────── SIM STATS ──────────────
         _sc2 = col_w * 2
         _sc3 = col_w * 3
-        x = put("SIM STATS  ", _sc2 + pad_x, _hdr_y, white)
-        put("overview", x, _hdr_y, sec_col)
+        put("SIM STATS", _sc2 + pad_x, _hdr_y, white)
+        _fp_mode = getattr(self.warehouse, '_flow_policy_mode', 'balanced')
+        _fp_style = self._FLOW_POLICY_STYLE.get(_fp_mode, self._FLOW_POLICY_STYLE['balanced'])
+        for mode, bx0, by0, bx1, by1 in self._flow_policy_button_layout():
+            style = self._FLOW_POLICY_STYLE[mode]
+            active = (mode == _fp_mode)
+            composite[by0:by1, bx0:bx1] = style['bg'] if active else (18, 18, 18)
+            composite[by0:by1, bx0:bx0 + 1] = style['edge'] if active else (42, 42, 42)
+            composite[by0:by1, bx1 - 1:bx1] = style['edge'] if active else (42, 42, 42)
+            composite[by0:by0 + 1, bx0:bx1] = style['edge'] if active else (42, 42, 42)
+            composite[by1 - 1:by1, bx0:bx1] = style['edge'] if active else (42, 42, 42)
+            _label = style['label']
+            _fs_btn = 0.23
+            (_tw, _th), _ = cv2.getTextSize(_label, font, _fs_btn, 1)
+            _tx = bx0 + max((bx1 - bx0 - _tw) // 2, 1)
+            _ty = by0 + (by1 - by0 + _th) // 2
+            cv2.putText(composite, _label, (_tx, _ty), font, _fs_btn,
+                        style['text'] if active else (85, 85, 85), 1)
+        put("mode: {} ({})".format(_fp_mode.upper(), self._FLOW_POLICY_HINT.get(_fp_mode, _fp_mode)),
+            _sc2 + pad_x, _data_start - 1, _fp_style['text'], max_x=_sc3)
+        _sim_data_start = _data_start + lh
         _swhite = (200, 200, 200)
         _sdim   = (95, 95, 95)
         _s_val_x = _sc2 + 52  # label : value offset
         for si, (lbl, val, vcol) in enumerate(stats_lines):
-            y = _data_start + si * lh
+            y = _sim_data_start + si * lh
             if y >= mh + ph - 2:
                 break
             put(lbl + ":", _sc2 + pad_x, y, _sdim)
@@ -903,8 +1142,26 @@ class MainGame:
         # ────────────── PACKAGES ──────────────
         _np = len(self.warehouse.packages)
         _nm = self.warehouse.packagesMaxQuantity
-        x = put("PKGS ({}/{})  ".format(_np, _nm), col_w * 3 + pad_x, _hdr_y, white)
-        put("by deadline", x, _hdr_y, sec_col)
+        put("PKGS ({}/{})".format(_np, _nm), col_w * 3 + pad_x, _hdr_y, white)
+        _active_mode = getattr(self.warehouse, '_pkg_target_mode', 'random')
+        _pm_style = self._PKG_TARGET_STYLE.get(_active_mode, self._PKG_TARGET_STYLE['random'])
+        for mode, bx0, by0, bx1, by1 in self._pkg_target_button_layout():
+            style = self._PKG_TARGET_STYLE[mode]
+            active = (mode == _active_mode)
+            composite[by0:by1, bx0:bx1] = style['bg'] if active else (18, 18, 18)
+            composite[by0:by1, bx0:bx0 + 1] = style['edge'] if active else (42, 42, 42)
+            composite[by0:by1, bx1 - 1:bx1] = style['edge'] if active else (42, 42, 42)
+            composite[by0:by0 + 1, bx0:bx1] = style['edge'] if active else (42, 42, 42)
+            composite[by1 - 1:by1, bx0:bx1] = style['edge'] if active else (42, 42, 42)
+            _label = style['label']
+            _fs_btn = 0.23
+            (_tw, _th), _ = cv2.getTextSize(_label, font, _fs_btn, 1)
+            _tx = bx0 + max((bx1 - bx0 - _tw) // 2, 1)
+            _ty = by0 + (by1 - by0 + _th) // 2
+            cv2.putText(composite, _label, (_tx, _ty), font, _fs_btn,
+                        style['text'] if active else (85, 85, 85), 1)
+        put("mode: {} ({})".format(_active_mode.upper(), _pm_style['hint']),
+            col_w * 3 + pad_x, _data_start - 1, _pm_style['text'], max_x=cw)
 
         def _draw_pkg(x_start, y, p, max_end):
             td = p.timeToDeadline.total_seconds()
@@ -942,10 +1199,11 @@ class MainGame:
 
         # All packages by deadline (most urgent first) — fills entire column
         _pkgs_deadline = sorted(self.warehouse.packages, key=lambda p: p.timeToDeadline)
-        _max_pkg_rows = _split * 2 + 1  # use full column height
+        _pkg_rows_start = _data_start + lh
+        _max_pkg_rows = _split * 2
         for pi in range(_max_pkg_rows):
             if pi >= len(_pkgs_deadline): break
-            y = _data_start + pi * lh
+            y = _pkg_rows_start + pi * lh
             if y >= mh + ph - 2: break
             _draw_pkg(col_w * 3 + pad_x, y, _pkgs_deadline[pi], cw)
 
@@ -955,7 +1213,8 @@ class MainGame:
             overdue = sum(1 for p in self.warehouse.packages if p.timeToDeadline.total_seconds() < 0)
             self._late_total += overdue   # accumulate: each 1-s sample adds current late count
             mean_batt = float(np.mean([r.batteryPercent for r in self.warehouse.robots])) if self.warehouse.robots else 0.0
-            need_charge = sum(1 for r in self.warehouse.robots if r.batteryPercent <= 20)
+            _charge_cutoff = getattr(self.warehouse, '_charge_threshold', 20)
+            need_charge = sum(1 for r in self.warehouse.robots if r.batteryPercent <= _charge_cutoff)
             charging    = sum(1 for r in self.warehouse.robots if r.status == "charging")
             idle_count  = sum(1 for r in self.warehouse.robots if r.status == "idle")
             self._hist_imported = np.roll(self._hist_imported, -1); self._hist_imported[-1] = self.warehouse.packagesRollingCount

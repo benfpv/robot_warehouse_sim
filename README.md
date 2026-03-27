@@ -11,8 +11,8 @@ A real-time autonomous warehouse simulation. Robots dynamically pick up, transpo
 - **Warehouse zones** — three zone types (import / storage / export) painted on an 80×70 grid; packages enter via import and exit when exported from the export zone before their deadline.  Zones can be painted interactively or loaded from a PNG map file.
 - **Adaptive zone optimizer** — monitors per-zone utilization via EMA and automatically swaps boundary cells between zone types to rebalance capacity.  Zone-swap only: no zone is ever eliminated and no new zones are created from neutral space.
 - **Packages** — each has a unique ID, real-time position & status, a deadline-to-export (10–90 s), colour-coded urgency, age tracking (`createdAt`), and a full import-to-export history log.  Urgency-based routing sends near-deadline packages to export and others to storage.
-- **Robots** — up to 60 robots, each with a priority-based action queue, dynamic battery depletion with adaptive eco-mode, automatic charging dispatch, age tracking (`createdAt`), and single-package carrying capacity.
-- **Chargers** — up to 10 charging stations; robots are dispatched when battery falls below a dynamic threshold (25–50 %, adapts to charger pressure). Charger exclusivity is enforced via action-queue ground-truth checks with per-tick stale-reservation reconciliation and an arrival guard.
+- **Robots** — up to 60 robots, each with a priority-based action queue, dynamic battery depletion with an adaptive Power Policy, automatic charging dispatch, age tracking (`createdAt`), and single-package carrying capacity.
+- **Chargers** — up to 10 charging stations; robots are dispatched when battery falls below a Power Policy threshold (profile-dependent range, roughly 27–50 %, adapts to charger pressure and is smoothed to avoid abrupt flips). Charger exclusivity is enforced via action-queue ground-truth checks with per-tick stale-reservation reconciliation and an arrival guard.
 - **Flow control** — adaptive import cap targeting ~50 % warehouse occupancy with proportional correction, overdue/stress penalties, and idle-robot bonus.
 - **Dynamic planning depth** — the package move pipeline is capped at `available_robots × 2` to avoid over-planning when many robots are charging or busy.
 - **Task scheduler** — the warehouse assigns packages to robots deadline-first, respects zone capacity, and avoids duplicate movement effort via `packagesMoveList` / `packagesMovingList`.
@@ -52,8 +52,8 @@ A real-time autonomous warehouse simulation. Robots dynamically pick up, transpo
 
 **Info panel** (4 columns × 240 px) shows:
 - **ROBOTS** — top-7 active robots (sorted by task urgency) + top-7 lowest-battery robots, colour-coded by state.
-- **CHARGERS** — charger status + fleet power summary (avg battery, drain, pressure, threshold, working/charging/idle counts).
-- **SIM STATS** — elapsed time, loop count, exports, package count, robot count, zone fill levels with rates, zone utilization, and optimizer status.
+- **CHARGERS** — charger status + fleet Power Policy summary (avg battery, drain, smoothed/raw pressure, smoothed/raw threshold, working/charging/idle counts), plus mode buttons (`ECO`, `BAL`, `PERF`) for live power-policy override.
+- **SIM STATS** — elapsed time, loop count, exports, package count, robot count, zone fill levels with rates, zone utilization, optimizer status, and flow-policy buttons (`STDY`, `BAL`, `THRU`) for live flow-control override.
 - **PACKAGES** — all packages sorted by deadline urgency with zone, target, carrier, status, weight, item name and destination.
 
 All text is clipped to its column boundary with overflow protection.
@@ -66,7 +66,7 @@ All text is clipped to its column boundary with overflow protection.
 
 **Top-right panels:**
 - *Deadlines* — 5-band urgency histogram (OVR/CRIT/URG/NRML/CMFT) with per-band count and percentage
-- *Fleet Batt* — horizontal bar chart showing every robot's battery level sorted ascending, with status indicators (charging/en-route/saving/carrying) and dynamic charge threshold line
+- *Fleet Batt* — horizontal bar chart showing every robot's battery level sorted ascending, with status indicators (charging/en-route/saving/carrying), a dynamic threshold line, and a compact Power Policy readout
 
 ---
 
@@ -116,8 +116,34 @@ All key parameters live in two places:
 | `chargersMaxQuantity` | `10` | Max charging stations |
 | `packagesMaxMoveQuantity` | `120` | Max packages in the delivery pipeline at once |
 | `robotsTaskAssignmentMaxQuantity` | `3` | Max queued tasks per robot |
+| `_pkg_target_mode` | `nearest` | Target placement mode inside a destination zone (`random`, `nearest`, `zone_edge`) |
 
 Zone geometry (pad, thirds) is set in `data/warehouse/warehouse_init.py` → `init_zoneMap`.
+
+## Package Target Modes
+
+Package target placement inside a zone is live-switchable from the button group in the `PKGS` panel.
+
+- `random` spreads packages across the zone. This is best when the warehouse is dense or congested and you want to avoid edge clustering.
+- `nearest` picks the closest free cell in the target zone. This is best when minimizing immediate travel distance matters more than even distribution.
+- `zone_edge` picks the closest free cell on the target zone boundary. This is best for pipeline flow, because packages stage near the next likely handoff between import, storage, and export.
+
+The active mode also appears in the `SIM STATS` panel as `target:`, with a short rationale hint: `spread`, `min dist`, or `pipeline`.
+
+## Strategy Override Buttons
+
+Three strategy groups are now UI-selectable directly from the dashboard:
+
+- **Power Policy** (`CHARGERS` header): `ECO`, `BAL`, `PERF`
+- `ECO`: larger battery buffers and earlier charging
+- `BAL`: default profile
+- `PERF`: lower buffers for higher utilization
+- **Flow Policy** (`SIM STATS` header): `STDY`, `BAL`, `THRU`
+- `STDY`: lower target occupancy for stability
+- `BAL`: default 50% occupancy target
+- `THRU`: higher target occupancy for throughput
+- **Package Target Mode** (`PACKAGES` header): `RND`, `NEAR`, `EDGE`
+- Controls placement strategy inside the destination zone
 
 ---
 
