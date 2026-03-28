@@ -1,7 +1,10 @@
+"""General-purpose grid and geometry utility functions."""
 import random
 import numpy as np
 
+
 class Functions:
+    """Static helpers for screen geometry, perimeter coordinates, and cardinal directions."""
     @staticmethod
     def get_screensize(screenshot):
         #print("Functions.get_screensize()")

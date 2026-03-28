@@ -110,7 +110,7 @@ class Package_Functions:
         #r = random.randint(1,254)
         #b = random.randint(1,254)
         #colour = [b, g, r]
-        colour = [120, 120, 120]
+        colour = [160, 140, 110]
         areaTarget = "none"
         xyLocationTarget = xyLocation.copy()
         status = "idle"

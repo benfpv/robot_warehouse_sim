@@ -1,6 +1,14 @@
+"""Rolling timeseries container for warehouse metrics."""
 import numpy as np
 
+
 class Warehouse_Data:
+    """Fixed-length NumPy arrays storing per-tick warehouse statistics.
+
+    Each array has length ``dataMaxLength`` and is updated via
+    ``np.roll`` + write-last on every tick.  Used for historical
+    charting and trend analysis.
+    """
     def __init__(self,  
                         dataMaxLength, # Input variable
                         # Time

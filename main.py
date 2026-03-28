@@ -1,3 +1,9 @@
+"""Robot Warehouse Simulator — entry point and composite dashboard.
+
+Runs the simulation loop at 40 Hz and renders a 960×540 composite OpenCV
+window with 8 sub-views, a 4-column info panel, and a 4-chart strip.
+All display, mouse, and keyboard interaction is handled here.
+"""
 import os
 import numpy as np
 import math
@@ -20,7 +26,16 @@ from data.paint.map_importer import MapImporter
 from data.paint.warehouse_optimizer import WarehouseOptimizer
 from data.paint.zone_strategy import ZoneStrategy
 
+
 class MainGame:
+    """Top-level simulation controller.
+
+    Owns the Warehouse instance, the composite display window, the
+    paint/zone-edit handler, the optimizer, heatmaps, chart histories,
+    and all rendering logic.  ``gameStart()`` enters the main loop which
+    alternates between ``gameLoop()`` (sim tick) and ``gameDraw()``
+    (rate-limited display repaint).
+    """
     _DISPLAY_FPS_OPTIONS = [30, 60]
     _POWER_POLICY_MODES = ['eco', 'balanced', 'performance']
     _POWER_POLICY_STYLE = {
@@ -406,6 +421,12 @@ class MainGame:
         return str(val)
 
     def gameLoop(self, loop_count):
+        """Execute one simulation tick and optionally repaint.
+
+        Sequence: optimizer step → warehouse.update_warehouse() →
+        accumulate robot heatmaps (fast + slow, fleet-scaled half-lives) →
+        rate-limited gameDraw().  Sleeps to maintain the target sim_frametime.
+        """
         timeLoopStart = time.time()
 
         self.timeElapsed = int(time.time() - self.timeStart)
@@ -421,14 +442,22 @@ class MainGame:
         # Accumulate robot traffic heatmap — only moving robots, not idle/charging
         # Decay is time-anchored: per-tick factor = 0.5^(dt / half_life), so the
         # visible window stays constant regardless of sim speed or FPS setting.
+        # Half-lives scale with fleet size: fewer robots → longer memory so
+        # patterns still emerge even with 2 robots.
         _STATIC = {'idle', 'charging'}
-        self._robot_heatmap      *= 0.5 ** (self.sim_frametime / 8.0)
-        self._robot_heatmap_slow *= 0.5 ** (self.sim_frametime / 300.0)  # 5-min half-life
+        _n_bots = max(len(self.warehouse.robots), 1)
+        _fast_hl = max(8.0,  120.0 / _n_bots)   # 2 bots→60s,  10→12s, 60→8s
+        _slow_hl = max(300.0, 3600.0 / _n_bots)  # 2 bots→30min, 10→6min, 60→5min
+        self._robot_heatmap      *= 0.5 ** (self.sim_frametime / _fast_hl)
+        self._robot_heatmap_slow *= 0.5 ** (self.sim_frametime / _slow_hl)
+        # Accumulation boost: small fleets add more per step so the heatmap
+        # builds to visible intensity faster.
+        _heat_gain = max(1.0, 10.0 / _n_bots)    # 2 bots→5x, 10→1x, 60→1x
         for _rb in self.warehouse.robots:
             if _rb.status not in _STATIC:
                 _rx, _ry = _rb.xyLocation
-                self._robot_heatmap[_ry, _rx]      += 1.0
-                self._robot_heatmap_slow[_ry, _rx] += 1.0
+                self._robot_heatmap[_ry, _rx]      += _heat_gain
+                self._robot_heatmap_slow[_ry, _rx] += _heat_gain
 
         # Draw (rate-limited independently of sim)
         now = time.time()
@@ -448,6 +477,14 @@ class MainGame:
         return self, frameTime
 
     def gameDraw(self):
+        """Build and display the composite dashboard window.
+
+        Layout (960×540 px):
+          Row 0: Main view (320×280) | Chargers | Packages | Zone Map | Deadlines+Fleet Batt
+          Row 1: (main view cont.)   | Robots   | Pkg Tgts | Heatmap  | Flow Ctrl
+          Info panel: ROBOTS | CHARGERS | SIM STATS | PACKAGES (4×240 px)
+          Chart strip: Exports&Overdue | Flow Control | Zone Bars | Fleet Health
+        """
         # Draw main view
         self.warehouseWindow = self.warehouse_windowArray.copy()
         self.warehouseWindow = Draw_Warehouse.draw_warehouseZones(self.warehouseWindow, self.warehouse.zoneMap, {1: self.warehouse.colourOfImportAreas, 2: self.warehouse.colourOfStorageAreas, 3: self.warehouse.colourOfExportAreas})
@@ -468,23 +505,16 @@ class MainGame:
         # Main view (left column)
         composite[0:mh, 0:mw] = cv2.resize(self.warehouseWindow, (mw, mh), interpolation=cv2.INTER_NEAREST)
 
-        # Directionality overlay: filled circle (state-coded) + arrowhead showing heading.
-        # Drawn on the upscaled composite so sub-pixel accuracy is preserved.
+        # Robot overlay: filled circle on the main view.
         _scale_x = mw / max(self.warehouse_res[0], 1)
         _scale_y = mh / max(self.warehouse_res[1], 1)
-        _cell_px  = min(_scale_x, _scale_y)            # pixels per grid cell
-        _r_body   = max(int(_cell_px * 0.55), 1)       # robot body radius
-        _arrow_len = max(int(_cell_px * 1.5), 3)       # heading arrow length
+        _cell_px  = min(_scale_x, _scale_y)
+        _r_body   = max(int(_cell_px * 0.55), 1)
         for _rb in self.warehouse.robots:
             _cx = int(_rb.xyLocation[0] * _scale_x + _scale_x * 0.5)
             _cy = int(_rb.xyLocation[1] * _scale_y + _scale_y * 0.5)
-            _dir_rad = math.radians(float(getattr(_rb, 'direction', 0.0)))
-            _hx = int(round(_cx + math.cos(_dir_rad) * _arrow_len))
-            _hy = int(round(_cy + math.sin(_dir_rad) * _arrow_len))
-            # Draw: dark outline circle, white body, grey arrowhead
             cv2.circle(composite, (_cx, _cy), _r_body + 1, (0, 0, 0), -1)
             cv2.circle(composite, (_cx, _cy), _r_body, (220, 220, 220), -1)
-            cv2.line(composite, (_cx, _cy), (_hx, _hy), (200, 200, 200), 1)
 
         # Display FPS controls (30/60) in main view header.
         _active_fps = int(round(1.0 / max(self.draw_frametime, 1e-9)))
@@ -514,24 +544,93 @@ class MainGame:
         place_binary(self.warehouse.packagesInWarehouse,        0, 1)
         place_binary(self.warehouse.robotsInWarehouse,          1, 0)
 
-        # Directionality overlay on the robots sub-view (row 1, col 0).
-        # Same state-coded circle + arrowhead as the main view, scaled to sub-view.
-        _sub_ox = mw                  # x offset of robots sub-view in composite
-        _sub_oy = sh                  # y offset of robots sub-view in composite
+        _sub_ox = mw
+        _sub_oy = sh
         _sub_sx = sw / max(self.warehouse_res[0], 1)
         _sub_sy = sh / max(self.warehouse_res[1], 1)
         _sub_cell = min(_sub_sx, _sub_sy)
         _sub_r    = max(int(_sub_cell * 0.55), 1)
-        _sub_alen = max(int(_sub_cell * 1.5), 2)
+
+        # Speed-profile legend: tiny horizontal gradient bar (slow→fast).
+        _sp_x0 = _sub_ox + sw - 50
+        _sp_y0 = _sub_oy + sh - 10
+        _sp_w = 36
+        _sp_h = 5
+        cv2.rectangle(composite, (_sp_x0 - 1, _sp_y0 - 1), (_sp_x0 + _sp_w + 1, _sp_y0 + _sp_h + 1), (18, 18, 18), -1)
+        for _gi in range(_sp_w):
+            _gt = _gi / max(_sp_w - 1, 1)
+            _gt = max(0.0, min(1.0, _gt))
+            if _gt <= 0.5:
+                _gs = _gt * 2.0
+                _gc = (int(60 - 10 * _gs), int(80 + 120 * _gs), int(220))
+            else:
+                _gs = (_gt - 0.5) * 2.0
+                _gc = (int(50 + 180 * _gs), int(200 + 10 * _gs), int(220 - 150 * _gs))
+            cv2.line(composite, (_sp_x0 + _gi, _sp_y0), (_sp_x0 + _gi, _sp_y0 + _sp_h - 1), _gc, 1)
+        cv2.putText(composite, 'spd', (_sp_x0 + _sp_w + 2, _sp_y0 + _sp_h - 1),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.2, (100, 100, 100), 1)
+
+        def _speed_to_bgr(t):
+            """Map normalised speed t in [0,1] to a BGR colour.
+
+            Gradient: red (slow, t=0) → yellow (t=0.5) → cyan (fast, t=1).
+            """
+            t = max(0.0, min(1.0, t))
+            if t <= 0.5:
+                s = t * 2.0
+                return (int(60 - 10 * s), int(80 + 120 * s), int(220))
+            s = (t - 0.5) * 2.0
+            return (int(50 + 180 * s), int(200 + 10 * s), int(220 - 150 * s))
+
         for _rb in self.warehouse.robots:
+            # Planned path preview (A* waypoints) on robots sub-view only.
+            _path_cells = [list(_rb.xyLocation)]
+            _rb_path = list(getattr(_rb, 'path', []))
+            if _rb_path:
+                _path_cells.extend([list(_p) for _p in _rb_path])
+            elif getattr(_rb, 'xyLocationTarget', None) and list(_rb.xyLocationTarget) != list(_rb.xyLocation):
+                _path_cells.append(list(_rb.xyLocationTarget))
+            elif getattr(_rb, 'pathTarget', None):
+                _path_cells.append(list(_rb.pathTarget))
+            elif getattr(_rb, 'actionQueue', None):
+                _path_cells.append(list(_rb.actionQueue[0][0]))
+
+            # Draw speed-profiled path: each segment coloured by planned speed.
+            _rb_plan = list(getattr(_rb, 'pathPlan', []))
+            _rb_max_v = max(float(getattr(_rb, 'maxVelocity', 0.6)), 0.01)
+            if len(_path_cells) >= 2:
+                for _seg_i in range(len(_path_cells) - 1):
+                    _p0 = _path_cells[_seg_i]
+                    _p1 = _path_cells[_seg_i + 1]
+                    _sx0 = int(_p0[0] * _sub_sx + _sub_sx * 0.5) + _sub_ox
+                    _sy0 = int(_p0[1] * _sub_sy + _sub_sy * 0.5) + _sub_oy
+                    _sx1 = int(_p1[0] * _sub_sx + _sub_sx * 0.5) + _sub_ox
+                    _sy1 = int(_p1[1] * _sub_sy + _sub_sy * 0.5) + _sub_oy
+                    # pathPlan[k] aligns with path[k] = _path_cells[k+1]
+                    _plan_idx = _seg_i  # index into pathPlan for destination cell
+                    if _rb_plan and 0 <= _plan_idx < len(_rb_plan):
+                        _seg_spd = _rb_plan[_plan_idx].get('speed', _rb_max_v * 0.5)
+                    else:
+                        _seg_spd = _rb_max_v * 0.5
+                    _t = _seg_spd / _rb_max_v
+                    _seg_col = _speed_to_bgr(_t)
+                    cv2.line(composite, (_sx0, _sy0), (_sx1, _sy1), _seg_col, 1, cv2.LINE_AA)
+
+                # Corner markers: small dots at planned sharp turns.
+                for _mi in range(len(_rb_plan)):
+                    if _rb_plan[_mi].get('turn_deg', 0) >= 40.0:
+                        _pc = _path_cells[_mi + 1] if _mi + 1 < len(_path_cells) else None
+                        if _pc is not None:
+                            _mx = int(_pc[0] * _sub_sx + _sub_sx * 0.5) + _sub_ox
+                            _my = int(_pc[1] * _sub_sy + _sub_sy * 0.5) + _sub_oy
+                            _mt = _rb_plan[_mi].get('speed', _rb_max_v * 0.5) / _rb_max_v
+                            cv2.circle(composite, (_mx, _my), max(int(_sub_cell * 0.3), 1),
+                                       _speed_to_bgr(_mt), -1)
+
             _cx = int(_rb.xyLocation[0] * _sub_sx + _sub_sx * 0.5) + _sub_ox
             _cy = int(_rb.xyLocation[1] * _sub_sy + _sub_sy * 0.5) + _sub_oy
-            _dir_rad = math.radians(float(getattr(_rb, 'direction', 0.0)))
-            _hx = int(round(_cx + math.cos(_dir_rad) * _sub_alen))
-            _hy = int(round(_cy + math.sin(_dir_rad) * _sub_alen))
             cv2.circle(composite, (_cx, _cy), _sub_r + 1, (0, 0, 0), -1)
             cv2.circle(composite, (_cx, _cy), _sub_r, (220, 220, 220), -1)
-            cv2.line(composite, (_cx, _cy), (_hx, _hy), (200, 200, 200), 1)
 
         # Traffic heatmap — row 1, col 2 (dedicated panel, full sw×sh)
         # Normalization: percentile-clip at 98th percentile so isolated hotspots
@@ -775,6 +874,66 @@ class MainGame:
 
         composite[_DL_H+1:sh, mw+sw*3:mw+sw*4] = _fb_img
 
+        # ── Flow control readout (row 1, col 3) ─────────────────────
+        _fl_img = np.zeros((sh, sw, 3), dtype=np.uint8)
+        _fl_font = cv2.FONT_HERSHEY_SIMPLEX
+        _fl_cap = int(getattr(wh, '_flow_import_cap', 0))
+        _fl_n_robots = max(len(wh.robots), 1)
+        _fl_ceiling = _fl_n_robots * 10
+        _fl_pipeline = getattr(wh, '_flow_pipeline_depth', 4)
+        _fl_n_pkgs = len(wh.packages)
+        _fl_n_idle = sum(1 for r in wh.robots if r.status == 'idle')
+        _fl_n_overdue = sum(1 for p in wh.packages if p.timeToDeadline.total_seconds() < 0)
+        _fl_throughput = getattr(wh, '_flow_throughput', 0) * 60
+        _fl_delivery = getattr(wh, '_flow_avg_delivery', 0)
+        _fl_mode = getattr(wh, '_flow_policy_mode', 'balanced')
+        # Cap utilisation bar
+        _fl_bar_y = 16
+        _fl_bar_h = 10
+        _fl_bar_w = sw - 8
+        _fl_fill = int((_fl_cap / max(_fl_ceiling, 1)) * _fl_bar_w) if _fl_ceiling > 0 else 0
+        cv2.rectangle(_fl_img, (4, _fl_bar_y), (4 + _fl_bar_w, _fl_bar_y + _fl_bar_h), (25, 25, 25), -1)
+        if _fl_fill > 0:
+            _fl_bar_col = (80, 190, 80) if _fl_cap >= _fl_n_robots * 3 else (50, 200, 200)
+            cv2.rectangle(_fl_img, (4, _fl_bar_y), (4 + _fl_fill, _fl_bar_y + _fl_bar_h), _fl_bar_col, -1)
+        _fl_cap_str = "cap {}/{}".format(_fl_cap, _fl_ceiling)
+        (_fcw, _), _ = cv2.getTextSize(_fl_cap_str, _fl_font, 0.26, 1)
+        cv2.putText(_fl_img, _fl_cap_str, (4 + (_fl_bar_w - _fcw) // 2, _fl_bar_y + _fl_bar_h - 2),
+                    _fl_font, 0.26, (200, 200, 200), 1)
+        # Package-count bar (how full vs cap)
+        _fl_pkg_bar_y = _fl_bar_y + _fl_bar_h + 3
+        _fl_pkg_fill = int((min(_fl_n_pkgs, _fl_cap) / max(_fl_cap, 1)) * _fl_bar_w) if _fl_cap > 0 else 0
+        cv2.rectangle(_fl_img, (4, _fl_pkg_bar_y), (4 + _fl_bar_w, _fl_pkg_bar_y + _fl_bar_h), (25, 25, 25), -1)
+        if _fl_pkg_fill > 0:
+            _fl_pkg_col = (80, 80, 200) if _fl_n_pkgs > _fl_cap else (80, 160, 80)
+            cv2.rectangle(_fl_img, (4, _fl_pkg_bar_y), (4 + _fl_pkg_fill, _fl_pkg_bar_y + _fl_bar_h), _fl_pkg_col, -1)
+        _fl_pkg_str = "pkgs {}/{}".format(_fl_n_pkgs, _fl_cap)
+        (_fpw, _), _ = cv2.getTextSize(_fl_pkg_str, _fl_font, 0.26, 1)
+        cv2.putText(_fl_img, _fl_pkg_str, (4 + (_fl_bar_w - _fpw) // 2, _fl_pkg_bar_y + _fl_bar_h - 2),
+                    _fl_font, 0.26, (200, 200, 200), 1)
+        # Flow metrics
+        _fl_data_y = _fl_pkg_bar_y + _fl_bar_h + 14
+        _fl_idle_pct = _fl_n_idle / _fl_n_robots * 100
+        _fl_ovrd_pct = _fl_n_overdue / max(_fl_n_pkgs, 1) * 100
+        _fl_lines = [
+            ("pipeline", "{} pkg/bot".format(_fl_pipeline), (140, 140, 140)),
+            ("pkg/bot",  "{:.1f}".format(_fl_n_pkgs / _fl_n_robots), (180, 180, 180)),
+            ("idle",     "{}/{} ({:.0f}%)".format(_fl_n_idle, _fl_n_robots, _fl_idle_pct),
+             (50, 200, 200) if _fl_n_idle > 0 else (80, 80, 80)),
+            ("overdue",  "{} ({:.0f}%)".format(_fl_n_overdue, _fl_ovrd_pct),
+             (80, 80, 210) if _fl_n_overdue > 0 else (80, 80, 80)),
+            ("thr/min",  "{:.1f}".format(_fl_throughput), (200, 180, 60)),
+            ("deliv",    "{:.1f}s".format(_fl_delivery), (50, 160, 220) if _fl_delivery > 0 else (80, 80, 80)),
+            ("mode",     _fl_mode, (120, 180, 120)),
+        ]
+        for _fli, (_fl_lbl, _fl_val, _fl_vcol) in enumerate(_fl_lines):
+            _fly = _fl_data_y + _fli * 11
+            if _fly >= sh - 4:
+                break
+            cv2.putText(_fl_img, _fl_lbl + ":", (4, _fly), _fl_font, 0.24, (95, 95, 95), 1)
+            cv2.putText(_fl_img, _fl_val, (58, _fly), _fl_font, 0.24, _fl_vcol, 1)
+        composite[sh:2*sh, mw+sw*3:mw+sw*4] = _fl_img
+
         # Zone map (top-right) — reserve BUTTON_H at bottom and BRUSH_W on right
         _btn_h   = self.paint_handler.BUTTON_H
         _brush_w = self.paint_handler.BRUSH_W
@@ -852,6 +1011,7 @@ class MainGame:
             (_zonemap_title, mw+sw*2+4,    4),
             ("DEADLINES",    mw+sw*3+4,    4),
             ("FLEET BATT",   mw+sw*3+4,    74),
+            ("FLOW CTRL",    mw+sw*3+4,    sh + 4),
         ]
         for _ttxt, _tx, _ty in _titles:
             cv2.putText(composite, _ttxt, (_tx, _ty + 8), _tfont, 0.28, _tcol, 1)
@@ -956,7 +1116,7 @@ class MainGame:
             ("util",     _util_str, _util_col),
             ("opt",      _opt_str,  _opt_col),
             ("power",    _power_mode, _power_col),
-            ("flow",     _flow_mode, _flow_col),
+            ("flow",     "{} c:{}".format(_flow_mode, int(getattr(wh, '_flow_import_cap', 0))), _flow_col),
             ("target",   _target_str, _target_col),
         ]
         # (SIM STATS rendering moved to info panel column 3)
@@ -1377,7 +1537,7 @@ class MainGame:
         _outline(mw + sw*2,  0,   mw + sw * 3, sh)           # zone map
         _outline(mw + sw*2,  sh,  mw + sw * 3, sh * 2)       # traffic heatmap
         _outline(mw + sw*3,  0,   mw + sw * 4, sh)            # deadlines + fleet batt
-        _outline(mw + sw*3,  sh,  mw + sw * 4, sh * 2)       # (empty)
+        _outline(mw + sw*3,  sh,  mw + sw * 4, sh * 2)       # flow control
         # Info panel (one outline for the whole strip)
         _outline(0,           mh,       cw,           mh + ph)      # info panel
         # Chart strip (four charts)

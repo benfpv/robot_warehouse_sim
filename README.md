@@ -11,10 +11,10 @@ A real-time autonomous warehouse simulation. Robots dynamically pick up, transpo
 - **Warehouse zones** — three zone types (import / storage / export) painted on an 80×70 grid; packages enter via import and exit when exported from the export zone before their deadline.  Zones can be painted interactively or loaded from a PNG map file.
 - **Adaptive zone optimizer** — monitors per-zone utilization via EMA and automatically swaps boundary cells between zone types to rebalance capacity.  Zone-swap only: no zone is ever eliminated and no new zones are created from neutral space.
 - **Packages** — each has a unique ID, real-time position & status, a deadline-to-export (10–90 s), colour-coded urgency, age tracking (`createdAt`), and a full import-to-export history log.  Urgency-based routing sends near-deadline packages to export and others to storage.
-- **Robots** — up to 60 robots, each with a priority-based action queue, dynamic battery depletion with an adaptive Power Policy, automatic charging dispatch, age tracking (`createdAt`), and single-package carrying capacity.
+- **Robots** — up to 60 robots, each with a priority-based action queue, A*-based pathfinding with speed profiling, dynamic battery depletion with an adaptive Power Policy, automatic charging dispatch, age tracking (`createdAt`), fleet scaling via decommission, and single-package carrying capacity.
 - **Chargers** — up to 10 charging stations; robots are dispatched when battery falls below a Power Policy threshold (profile-dependent range, roughly 27–50 %, adapts to charger pressure and uses extra damping/smoothing to avoid abrupt flips). Charger exclusivity is enforced via action-queue ground-truth checks with per-tick stale-reservation reconciliation and an arrival guard.
-- **Flow control** — adaptive import cap targeting ~50 % warehouse occupancy with proportional correction, overdue/stress penalties, and idle-robot bonus.
-- **Dynamic planning depth** — the package move pipeline is capped at `available_robots × 2` to avoid over-planning when many robots are charging or busy.
+- **Flow control** — adaptive import cap scaled to fleet size (`pipeline_depth × n_robots`).  Idle-robot bonus pulls more work when capacity is available; overdue penalty backs off only when robots are genuinely busy; 15 %-per-tick smoothing ramps quickly; emergency floor jumps cap if majority of robots idle.  Ceiling is `n_robots × 10`.
+- **Dynamic planning depth** — the package move pipeline is capped at `available_robots × 3` (floor 6) to keep the queue fed without over-planning when many robots are charging or busy.
 - **Task scheduler** — the warehouse assigns packages to robots deadline-first, respects zone capacity, and avoids duplicate movement effort via `packagesMoveList` / `packagesMovingList`.
 - **Sim / draw decoupling** — simulation ticks at 40 Hz; display repaints at 15 fps independently to save CPU.
 - **Rolling chart histories** — 1 800 samples at 1 sample/s (~30 min), with a dynamic time-window that grows from 30 s to the full history length.
@@ -26,7 +26,7 @@ A real-time autonomous warehouse simulation. Robots dynamically pick up, transpo
 ┌──────────────────────┬─────────┬─────────┬─────────┬──────────┐
 │                      │Chargers │Packages │Zone Map │Deadlines │  ← sub-views (160×140)
 │   Main view          ├─────────┼─────────┼─────────┤Fleet Batt│
-│   (320×280, 4× zoom) │ Robots  │Pkg Tgts │Heatmap  │ (empty)  │
+│   (320×280, 4× zoom) │ Robots  │Pkg Tgts │Heatmap  │Flow Ctrl │
 ├──────────┬───────────┴─────────┼─────────┼─────────┴──────────┤
 │  ROBOTS  │  CHARGERS           │SIM STATS│  PACKAGES          │  ← info panel 4×240px
 ├──────────┴──────────┬──────────┴─────────┬──────────┬─────────┤
@@ -41,14 +41,15 @@ A real-time autonomous warehouse simulation. Robots dynamically pick up, transpo
 | Dark green area | Import zone |
 | Dark blue area | Storage zone |
 | Dark red area | Export zone |
-| Teal dots (perimeter) | Charging stations |
+| Amber dots (perimeter) | Charging stations |
 | White dots | Robots |
-| Grey dots | Idle packages |
-| Bright green dots | Packages with an assigned robot & target |
-| Dark blue dots | Export zone, idle, deadline 10–60 s |
-| Light blue dots | Export zone, idle, deadline < 10 s |
-| Orange dots | Overdue packages planned for movement |
-| Red dots | Overdue packages with no plan |
+| Slate-blue dots | Idle packages (on-time, no assignment) |
+| Lime-green dots | Packages with an assigned robot & target (move planned) |
+| Cyan dots | Packages being carried by a robot |
+| Magenta dots | Overdue packages with no plan |
+| Pink dots | Overdue packages assigned/en-route |
+| Lavender dots | Export zone, idle, deadline 10–60 s |
+| Bright lavender dots | Export zone, idle, deadline < 10 s |
 
 **Info panel** (4 columns × 240 px) shows:
 - **ROBOTS** — top-7 active robots (sorted by task urgency) + top-7 lowest-battery robots, colour-coded by state.
@@ -67,6 +68,7 @@ All text is clipped to its column boundary with overflow protection.
 **Top-right panels:**
 - *Deadlines* — 5-band urgency histogram (OVR/CRIT/URG/NRML/CMFT) with per-band count and percentage
 - *Fleet Batt* — horizontal bar chart showing every robot's battery level sorted ascending, with status indicators (charging/en-route/saving/carrying), a dynamic threshold line, and a compact Power Policy readout
+- *Flow Ctrl* — live flow-control readout with cap-utilisation bar, package-count bar, pipeline depth, pkg/bot ratio, idle/overdue counts, throughput/min, and avg delivery time
 
 ---
 
@@ -139,9 +141,9 @@ Three strategy groups are now UI-selectable directly from the dashboard:
 - `BAL`: default profile
 - `PERF`: lower buffers for higher utilization
 - **Flow Policy** (`SIM STATS` header): `STDY`, `BAL`, `THRU`
-- `STDY`: lower target occupancy for stability
-- `BAL`: default 50% occupancy target
-- `THRU`: higher target occupancy for throughput
+  - `STDY`: lower pipeline depth (3 pkg/bot) for stability
+  - `BAL`: default pipeline depth (4 pkg/bot)
+  - `THRU`: higher pipeline depth (6 pkg/bot) for throughput
 - **Package Target Mode** (`PACKAGES` header): `RND`, `NEAR`, `EDGE`
 - Controls placement strategy inside the destination zone
 
@@ -190,10 +192,34 @@ robot_warehouse_sim/
 
 ---
 
+## Additional Systems
+
+### Decommission
+
+Robots can be retired gracefully via `set_robot_count()`.  The system flags excess robots as `decommissioning`, lets them finish current tasks, then pathfinds to the nearest perimeter cell ("move to exit") and removes them from the simulation.  Flow configuration rescales automatically.
+
+### Idle Parking
+
+Robots that finish all tasks and remain in a zone (import/storage/export) are sent to the nearest neutral (`ZONE_NONE`) cell at end-of-tick.  This prevents idle robots from blocking zone slots.
+
+### Delivery Cooldown
+
+After a package is dropped off, a 2-second cooldown prevents instant re-pickup.  This avoids the ping-pong problem where a robot drops a package in storage then immediately picks it up again.
+
+### Head-on Deadlock Avoidance
+
+Two mechanisms: (1) A* pathfinder treats other robot positions as soft-cost cells (cost 5.0), routing around occupied paths where possible.  (2) When two robots detect a head-on collision, the lower-numbered robot yields by stepping perpendicular.
+
+### Pathfinding
+
+Dense A* pathfinder: 8-direction, octile heuristic, every-cell waypoints.  Speed profiling annotates each waypoint with a planned speed based on turn severity (corner-only limits: ≥120°→20%, ≥90°→28%, ≥60°→40%, ≥25°→52% of maxVelocity).
+
+---
+
 ## Known Issues
 
 - When the export zone fills completely, already-planned package movements are not cancelled or re-prioritised in real time; robots may continue heading toward a full export zone until the next scheduler pass.
-- Robot movement is straight-line (beeline via atan2 → cardinal direction); there is no pathfinding or collision avoidance.
+- Robots are assigned packages deadline-first without considering proximity; a robot far from a package may be assigned over a nearer idle robot.
 
 ## Limitations
 

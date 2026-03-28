@@ -1,8 +1,11 @@
+"""Borderless Win32 window setup and display helpers (Windows only)."""
 import cv2
 import numpy as np
 import ctypes
 
+
 class Display_Functions:
+    """Static methods for creating and positioning a borderless OpenCV window via Win32 API."""
     @staticmethod
     def display_image(image_name, image, multiply_binary_255, resize_res, window_position = [None, None]):
         #print("- display_image(): {}".format(image_name))

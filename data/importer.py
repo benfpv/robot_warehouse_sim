@@ -1,8 +1,11 @@
+"""CSV data loaders for item catalogues and address lists."""
 import csv
 from data.item import *
 from data.address import *
 
+
 class Importer:
+    """Reads CSV files and converts rows into Item / Address objects."""
     @staticmethod
     def init_import_csv_as_list(csvPath):
         print('Importer.init_import_csv_as_list() ')

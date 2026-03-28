@@ -53,7 +53,7 @@ class Robot_Functions:
         timerCheckBattery = time.time()
         batteryPercent = random.randint(80,100)
         batteryChargingRate = random.randint(10,15) * .1
-        batteryDepletingRate = batteryChargingRate * 0.25
+        batteryDepletingRate = batteryChargingRate * 0.125
         actionQueue = []
         colour = [255, 255, 255]
         area = 'import'
