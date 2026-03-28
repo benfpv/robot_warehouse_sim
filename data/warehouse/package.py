@@ -18,3 +18,5 @@ class Package:
         self.status = status
         self.carrier = carrier
         self.createdAt = time.time()
+        self.deliveredAt = None  # stamped when dropped off; used for export cooldown
+        self.plannedAt = None     # stamped when status -> 'move planned'; stale-plan eviction

@@ -72,6 +72,15 @@ class Functions:
 
     @staticmethod
     def find_cardinal(degree):
+        # Safe default and normalized heading prevent branch gaps from crashing callers.
+        cardinal = 'E'
+        if degree is None:
+            return cardinal
+        try:
+            degree = float(degree)
+        except (TypeError, ValueError):
+            return cardinal
+        degree = ((degree + 180.0) % 360.0) - 180.0
         # degree of 360
         if degree == 0:
             cardinal = 'E'

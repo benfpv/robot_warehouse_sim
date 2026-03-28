@@ -21,6 +21,7 @@ from data.paint.warehouse_optimizer import WarehouseOptimizer
 from data.paint.zone_strategy import ZoneStrategy
 
 class MainGame:
+    _DISPLAY_FPS_OPTIONS = [30, 60]
     _POWER_POLICY_MODES = ['eco', 'balanced', 'performance']
     _POWER_POLICY_STYLE = {
         'eco': {'label': 'ECO', 'bg': (20, 30, 24), 'edge': (80, 180, 120), 'text': (140, 220, 170)},
@@ -85,7 +86,15 @@ class MainGame:
         self.addressesList = Importer.init_import_csv_as_list('resources/list_addresses.csv')
         self.addressesList = Importer.init_objectify_addresses_list(self.addressesList)
         # Init Warehouse
-        self.warehouse = Warehouse(self.warehouse_res, self.warehouse_windowBackgroundColour, self.warehouse_windowCenter, self.warehouse_windowArray, self.itemsList, self.addressesList)
+        self.warehouse = Warehouse(
+            self.warehouse_res,
+            self.warehouse_windowBackgroundColour,
+            self.warehouse_windowCenter,
+            self.warehouse_windowArray,
+            self.itemsList,
+            self.addressesList,
+            robotsMaxQuantity=2,
+        )
 
         # Optimizer (strategy pattern — zone rebalancing first, future: charger/robot)
         self.optimizer = WarehouseOptimizer(tick_rate=int(1 / self.sim_frametime))
@@ -194,6 +203,8 @@ class MainGame:
 
     def _on_mouse(self, event, px, py, flags, param):
         """Composite cv2 mouse callback. Handles dashboard controls, then delegates."""
+        if self._handle_display_fps_click(event, px, py):
+            return
         if self._handle_power_policy_click(event, px, py):
             return
         if self._handle_flow_policy_click(event, px, py):
@@ -201,6 +212,35 @@ class MainGame:
         if self._handle_pkg_target_mode_click(event, px, py):
             return
         self.paint_handler.on_mouse(event, px, py, flags, param)
+
+    def _set_display_fps(self, fps):
+        if fps not in self._DISPLAY_FPS_OPTIONS:
+            return
+        self.draw_frametime = 1.0 / float(fps)
+        print('[main] Display FPS -> {}'.format(fps))
+
+    def _display_fps_button_layout(self):
+        # Anchored to top-left of the main view so it does not overlap info-panel controls.
+        x0 = 106
+        y0 = 4
+        btn_w = 22
+        btn_h = 11
+        gap = 3
+        layout = []
+        for i, fps in enumerate(self._DISPLAY_FPS_OPTIONS):
+            bx0 = x0 + i * (btn_w + gap)
+            bx1 = bx0 + btn_w
+            layout.append((fps, bx0, y0, bx1, y0 + btn_h))
+        return layout
+
+    def _handle_display_fps_click(self, event, px, py):
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return False
+        for fps, bx0, by0, bx1, by1 in self._display_fps_button_layout():
+            if bx0 <= px < bx1 and by0 <= py < by1:
+                self._set_display_fps(fps)
+                return True
+        return False
 
     def _set_power_policy_mode(self, mode):
         if not self.warehouse.set_power_policy_mode(mode):
@@ -428,6 +468,43 @@ class MainGame:
         # Main view (left column)
         composite[0:mh, 0:mw] = cv2.resize(self.warehouseWindow, (mw, mh), interpolation=cv2.INTER_NEAREST)
 
+        # Directionality overlay: filled circle (state-coded) + arrowhead showing heading.
+        # Drawn on the upscaled composite so sub-pixel accuracy is preserved.
+        _scale_x = mw / max(self.warehouse_res[0], 1)
+        _scale_y = mh / max(self.warehouse_res[1], 1)
+        _cell_px  = min(_scale_x, _scale_y)            # pixels per grid cell
+        _r_body   = max(int(_cell_px * 0.55), 1)       # robot body radius
+        _arrow_len = max(int(_cell_px * 1.5), 3)       # heading arrow length
+        for _rb in self.warehouse.robots:
+            _cx = int(_rb.xyLocation[0] * _scale_x + _scale_x * 0.5)
+            _cy = int(_rb.xyLocation[1] * _scale_y + _scale_y * 0.5)
+            _dir_rad = math.radians(float(getattr(_rb, 'direction', 0.0)))
+            _hx = int(round(_cx + math.cos(_dir_rad) * _arrow_len))
+            _hy = int(round(_cy + math.sin(_dir_rad) * _arrow_len))
+            # Draw: dark outline circle, white body, grey arrowhead
+            cv2.circle(composite, (_cx, _cy), _r_body + 1, (0, 0, 0), -1)
+            cv2.circle(composite, (_cx, _cy), _r_body, (220, 220, 220), -1)
+            cv2.line(composite, (_cx, _cy), (_hx, _hy), (200, 200, 200), 1)
+
+        # Display FPS controls (30/60) in main view header.
+        _active_fps = int(round(1.0 / max(self.draw_frametime, 1e-9)))
+        _fps_font = cv2.FONT_HERSHEY_SIMPLEX
+        for fps, bx0, by0, bx1, by1 in self._display_fps_button_layout():
+            _active = (_active_fps == fps)
+            _bg = (24, 30, 22) if _active else (18, 18, 18)
+            _edge = (90, 180, 110) if _active else (42, 42, 42)
+            _txt_col = (150, 230, 170) if _active else (90, 90, 90)
+            composite[by0:by1, bx0:bx1] = _bg
+            composite[by0:by1, bx0:bx0 + 1] = _edge
+            composite[by0:by1, bx1 - 1:bx1] = _edge
+            composite[by0:by0 + 1, bx0:bx1] = _edge
+            composite[by1 - 1:by1, bx0:bx1] = _edge
+            _lbl = str(fps)
+            (_tw, _th), _ = cv2.getTextSize(_lbl, _fps_font, 0.24, 1)
+            _tx = bx0 + max((bx1 - bx0 - _tw) // 2, 1)
+            _ty = by0 + (by1 - by0 + _th) // 2
+            cv2.putText(composite, _lbl, (_tx, _ty), _fps_font, 0.24, _txt_col, 1)
+
         # Binary sub-views: multiply by 255, resize, convert to BGR
         def place_binary(arr, row, col):
             img = cv2.resize((arr * 255).astype(np.uint8), (sw, sh), interpolation=cv2.INTER_NEAREST)
@@ -436,6 +513,26 @@ class MainGame:
         place_binary(self.warehouse.chargersInWarehouse,        0, 0)
         place_binary(self.warehouse.packagesInWarehouse,        0, 1)
         place_binary(self.warehouse.robotsInWarehouse,          1, 0)
+
+        # Directionality overlay on the robots sub-view (row 1, col 0).
+        # Same state-coded circle + arrowhead as the main view, scaled to sub-view.
+        _sub_ox = mw                  # x offset of robots sub-view in composite
+        _sub_oy = sh                  # y offset of robots sub-view in composite
+        _sub_sx = sw / max(self.warehouse_res[0], 1)
+        _sub_sy = sh / max(self.warehouse_res[1], 1)
+        _sub_cell = min(_sub_sx, _sub_sy)
+        _sub_r    = max(int(_sub_cell * 0.55), 1)
+        _sub_alen = max(int(_sub_cell * 1.5), 2)
+        for _rb in self.warehouse.robots:
+            _cx = int(_rb.xyLocation[0] * _sub_sx + _sub_sx * 0.5) + _sub_ox
+            _cy = int(_rb.xyLocation[1] * _sub_sy + _sub_sy * 0.5) + _sub_oy
+            _dir_rad = math.radians(float(getattr(_rb, 'direction', 0.0)))
+            _hx = int(round(_cx + math.cos(_dir_rad) * _sub_alen))
+            _hy = int(round(_cy + math.sin(_dir_rad) * _sub_alen))
+            cv2.circle(composite, (_cx, _cy), _sub_r + 1, (0, 0, 0), -1)
+            cv2.circle(composite, (_cx, _cy), _sub_r, (220, 220, 220), -1)
+            cv2.line(composite, (_cx, _cy), (_hx, _hy), (200, 200, 200), 1)
+
         # Traffic heatmap — row 1, col 2 (dedicated panel, full sw×sh)
         # Normalization: percentile-clip at 98th percentile so isolated hotspots
         # don't crush the rest of the map to near-zero; then sqrt (gamma 0.5) to
