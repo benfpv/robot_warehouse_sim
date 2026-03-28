@@ -108,7 +108,7 @@ class MainGame:
             self.warehouse_windowArray,
             self.itemsList,
             self.addressesList,
-            robotsMaxQuantity=2,
+            robotsMaxQuantity=3,
         )
 
         # Optimizer (strategy pattern — zone rebalancing first, future: charger/robot)
@@ -184,7 +184,7 @@ class MainGame:
         self._late_total    = 0
         self._hist_batt       = np.zeros(_H, dtype=np.float32)
         self._hist_robots     = np.zeros(_H, dtype=np.float32)
-        self._hist_need_charge = np.zeros(_H, dtype=np.float32)
+        self._hist_working    = np.zeros(_H, dtype=np.float32)
         self._hist_charging   = np.zeros(_H, dtype=np.float32)
         self._hist_idle       = np.zeros(_H, dtype=np.float32)
         # Flow-control history arrays
@@ -223,6 +223,8 @@ class MainGame:
         if self._handle_power_policy_click(event, px, py):
             return
         if self._handle_flow_policy_click(event, px, py):
+            return
+        if self._handle_robot_count_click(event, px, py):
             return
         if self._handle_pkg_target_mode_click(event, px, py):
             return
@@ -354,6 +356,42 @@ class MainGame:
         for mode, bx0, by0, bx1, by1 in self._pkg_target_button_layout():
             if bx0 <= px < bx1 and by0 <= py < by1:
                 self._set_pkg_target_mode(mode)
+                return True
+        return False
+
+    def _robot_count_button_layout(self):
+        """Return [('-', bx0, by0, bx1, by1), ('+', bx0, by0, bx1, by1)].
+
+        Layout: [-] <num> [+]  anchored to top-right of the ROBOTS column.
+        """
+        mh = self.warehouse_windowRes[1]
+        cw = self.composite_windowRes[0]
+        col_w = cw // 4
+        pad_x = 4
+        btn_w = 14
+        btn_h = 11
+        num_w = 18           # space for the target number between buttons
+        gap = 2
+        total_w = btn_w * 2 + num_w + gap * 2
+        x0 = col_w - pad_x - total_w
+        y0 = mh + 3
+        return [
+            ('-', x0,                              y0, x0 + btn_w,                          y0 + btn_h),
+            ('+', x0 + btn_w + gap + num_w + gap,  y0, x0 + btn_w * 2 + num_w + gap * 2,   y0 + btn_h),
+        ]
+
+    def _handle_robot_count_click(self, event, px, py):
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return False
+        for action, bx0, by0, bx1, by1 in self._robot_count_button_layout():
+            if bx0 <= px < bx1 and by0 <= py < by1:
+                target = self.warehouse._robot_target_count
+                if action == '+':
+                    self.warehouse.set_robot_count(target + 1)
+                    print('[main] Robot target -> {} (+1)'.format(target + 1))
+                elif action == '-' and target > 1:
+                    self.warehouse.set_robot_count(target - 1)
+                    print('[main] Robot target -> {} (-1)'.format(target - 1))
                 return True
         return False
 
@@ -1210,6 +1248,34 @@ class MainGame:
         x = put("ROBOTS ({})  ".format(_nr), pad_x, _hdr_y, white)
         put("status | battery", x, _hdr_y, sec_col)
 
+        # +/- robot count buttons: [-] <target> [+]
+        _rc_layout = self._robot_count_button_layout()
+        for action, bx0, by0, bx1, by1 in _rc_layout:
+            _bg = (28, 28, 28)
+            _edge = (55, 55, 55)
+            composite[by0:by1, bx0:bx1] = _bg
+            composite[by0:by0 + 1, bx0:bx1] = _edge
+            composite[by1 - 1:by1, bx0:bx1] = _edge
+            composite[by0:by1, bx0:bx0 + 1] = _edge
+            composite[by0:by1, bx1 - 1:bx1] = _edge
+            _fs_btn = 0.28
+            (_tw, _th), _ = cv2.getTextSize(action, font, _fs_btn, 1)
+            _tx = bx0 + max((bx1 - bx0 - _tw) // 2, 1)
+            _ty = by0 + (by1 - by0 + _th) // 2
+            cv2.putText(composite, action, (_tx, _ty), font, _fs_btn, (180, 180, 180), 1)
+        # Target count centered between [-] and [+]
+        _rc_target = self.warehouse._robot_target_count
+        _rc_lbl = str(_rc_target)
+        _minus_right = _rc_layout[0][3]   # right edge of [-]
+        _plus_left   = _rc_layout[1][1]   # left edge of [+]
+        _rc_mid = (_minus_right + _plus_left) // 2
+        _rc_by0 = _rc_layout[0][2]
+        _rc_by1 = _rc_layout[0][4]
+        (_rc_tw, _rc_th), _ = cv2.getTextSize(_rc_lbl, font, 0.28, 1)
+        _rc_col = (140, 200, 140) if _rc_target == _nr else (100, 180, 230)
+        cv2.putText(composite, _rc_lbl, (_rc_mid - _rc_tw // 2, _rc_by0 + (_rc_by1 - _rc_by0 + _rc_th) // 2),
+                    font, 0.28, _rc_col, 1)
+
         # Top 7: by task priority (busiest first)
         _robots_by_status = sorted(self.warehouse.robots, key=lambda r: robot_priority.get(r.status, 7))
         for ri in range(min(_split, len(_robots_by_status))):
@@ -1471,16 +1537,16 @@ class MainGame:
             self._late_total += overdue   # accumulate: each 1-s sample adds current late count
             mean_batt = float(np.mean([r.batteryPercent for r in self.warehouse.robots])) if self.warehouse.robots else 0.0
             _charge_cutoff = getattr(self.warehouse, '_charge_threshold', 20)
-            need_charge = sum(1 for r in self.warehouse.robots if r.batteryPercent <= _charge_cutoff)
             charging    = sum(1 for r in self.warehouse.robots if r.status == "charging")
             idle_count  = sum(1 for r in self.warehouse.robots if r.status == "idle")
+            working     = len(self.warehouse.robots) - charging - idle_count
             self._hist_imported = np.roll(self._hist_imported, -1); self._hist_imported[-1] = self.warehouse.packagesRollingCount
             self._hist_exported = np.roll(self._hist_exported, -1); self._hist_exported[-1] = self.warehouse.packageExportRollingCount
             self._hist_overdue  = np.roll(self._hist_overdue,  -1); self._hist_overdue[-1]  = overdue
             self._hist_late     = np.roll(self._hist_late,     -1); self._hist_late[-1]     = self._late_total
             self._hist_batt         = np.roll(self._hist_batt,         -1); self._hist_batt[-1]         = mean_batt
             self._hist_robots       = np.roll(self._hist_robots,       -1); self._hist_robots[-1]       = len(self.warehouse.robots)
-            self._hist_need_charge  = np.roll(self._hist_need_charge,  -1); self._hist_need_charge[-1]  = need_charge
+            self._hist_working      = np.roll(self._hist_working,      -1); self._hist_working[-1]      = working
             self._hist_charging     = np.roll(self._hist_charging,     -1); self._hist_charging[-1]     = charging
             self._hist_idle         = np.roll(self._hist_idle,         -1); self._hist_idle[-1]         = idle_count
             # Flow control histories
@@ -1504,7 +1570,7 @@ class MainGame:
                 "tot_imp":  wh.packagesRollingCount,
                 "tot_late": self._late_total,
                 "batt":     mean_batt,
-                "need_chg": need_charge,
+                "working":  working,
                 "chging":   charging,
                 "idle":     idle_count,
             }
@@ -1663,16 +1729,15 @@ class MainGame:
         self._draw_zone_bars(canvas, w4 * 2, y0, w4 * 3, y1,
                              zone_rates={"Imp": _r("import"), "Sto": _r("storage"), "Exp": _r("expzone")})
 
-        # Chart 4: Fleet — Batt% on fixed scale; Robots/NeedCharge/Charging/Idle share robot-count scale
+        # Chart 4: Fleet — Batt% on fixed scale; Working/Charging/Idle share robot-count scale
         mini_chart(w4 * 3, cw, "Fleet Health",
                    [(self._hist_batt,        ( 50, 200, 200), "Batt%"),
-                    (self._hist_robots,      (200, 140,  70), "Robots"),
-                    (self._hist_need_charge, ( 30,  80, 230), "NeedChg"),
-                    (self._hist_charging,    ( 60, 220,  80), "Chging"),
-                    (self._hist_idle,        ( 90,  90,  90), "Idle")],
-                   shared_scale={"Robots", "NeedChg", "Chging", "Idle"},
+                    (self._hist_working,     ( 60, 180,  60), "Working"),
+                    (self._hist_charging,    ( 60, 220, 240), "Chging"),
+                    (self._hist_idle,        (130, 130, 130), "Idle")],
+                   shared_scale={"Working", "Chging", "Idle"},
                    fixed_scales={"Batt%": (0, 100)},
-                   rates={"Batt%": _r("batt"), "NeedChg": _r("need_chg"), "Chging": _r("chging"), "Idle": _r("idle")})
+                   rates={"Batt%": _r("batt"), "Working": _r("working"), "Chging": _r("chging"), "Idle": _r("idle")})
 
     def _draw_zone_bars(self, canvas, x0, y0, x1, y1, zone_rates=None):
         """Render zone capacity fill-bars into canvas[y0:y1, x0:x1]."""

@@ -47,6 +47,7 @@ class Robot:
 
     Fleet management:
         decommissioning:   True when robot is flagged for retirement.
+        birthLocation:     [x, y] grid cell where the robot was originally spawned.
     """
     def __init__(self, robotNumber, robotLog, timerCheckBattery, batteryPercent, batteryChargingRate, batteryDepletingRate, actionQueue, colour, area, xyLocation, areaTarget, xyLocationTarget, xyLocationDiff, direction, cardinal, velocity, status, carrying, carrier) -> None:
         self.robotNumber = robotNumber
@@ -91,6 +92,7 @@ class Robot:
         self.recentLocations = []
         self.replanCooldownTicks = 0
         self.decommissioning = False
+        self.birthLocation = xyLocation.copy()
 
 class Robot_Log:
     """Immutable log entry recording a robot action at a point in time."""

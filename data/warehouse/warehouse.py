@@ -155,6 +155,7 @@ class Warehouse:
         self.robotsLog = robotsLog
         self.robotsInWarehouse = robotsInWarehouse
         self.robotsMaxQuantity = robotsMaxQuantity
+        self._robot_target_count = robotsMaxQuantity
         self.robotsRollingCount = robotsRollingCount
         self.robotsInWarehouseCount = robotsInWarehouseCount
         self.robotsTaskAssignmentList = robotsTaskAssignmentList #[robot#, #oftasks]
@@ -346,23 +347,30 @@ class Warehouse:
         self._compute_robot_path(robot_index, list(target))
 
     def _queue_exit_task(self, robot_index):
-        """Queue a 'move to exit' task toward the nearest perimeter cell."""
+        """Queue a 'move to exit' task toward the robot's birth location.
+
+        Falls back to nearest perimeter cell if birth location is unavailable.
+        """
         r = self.robots[robot_index]
-        rx, ry = r.xyLocation
-        best_dist = float('inf')
-        best_cell = None
-        for coord in self.warehousePerimeterCoordinates:
-            cx, cy = coord[0], coord[1]
-            d = abs(rx - cx) + abs(ry - cy)
-            if d < best_dist:
-                best_dist = d
-                best_cell = [cx, cy]
-        if best_cell is None:
-            best_cell = [0, 0]
+        target = getattr(r, 'birthLocation', None)
+        if target is None:
+            # Fallback: nearest perimeter cell
+            rx, ry = r.xyLocation
+            best_dist = float('inf')
+            best_cell = None
+            for coord in self.warehousePerimeterCoordinates:
+                cx, cy = coord[0], coord[1]
+                d = abs(rx - cx) + abs(ry - cy)
+                if d < best_dist:
+                    best_dist = d
+                    best_cell = [cx, cy]
+            target = best_cell if best_cell is not None else [0, 0]
+        else:
+            target = list(target)
         self.robots[robot_index], self.robotsTaskAssignmentList, self.robotsLog = self.robot_insert_task(
-            robot_index, len(r.actionQueue), best_cell, "move to exit")
-        self._compute_robot_path(robot_index, best_cell)
-        _log.info('decommission: robot#%d queued exit to %s', r.robotNumber, best_cell)
+            robot_index, len(r.actionQueue), target, "move to exit")
+        self._compute_robot_path(robot_index, target)
+        _log.info('decommission: robot#%d queued exit to %s (birth)', r.robotNumber, target)
 
     def decommission_robot(self, robot_index):
         """Mark a robot for retirement. If idle, immediately queue exit task."""
@@ -385,8 +393,6 @@ class Warehouse:
         # Remove from robots list
         self.robots.pop(robot_index)
         self.robotsInWarehouseCount -= 1
-        # Reduce max so spawner doesn't backfill
-        self.robotsMaxQuantity = max(self.robotsMaxQuantity - 1, 0)
         _log.info('decommission: robot#%d removed from warehouse (fleet=%d)',
                    rnum, len(self.robots))
         # Rescale flow config for smaller fleet
@@ -406,11 +412,13 @@ class Warehouse:
 
         If target > current: raise robotsMaxQuantity (spawner handles the rest).
         If target < current: decommission excess robots, preferring idle then least-busy.
+        _robot_target_count is set immediately so the UI reflects the target.
         """
-        target_count = max(0, int(target_count))
+        target_count = max(1, int(target_count))
         current = len(self.robots)
+        self._robot_target_count = target_count
+        self.robotsMaxQuantity = target_count
         if target_count > current:
-            self.robotsMaxQuantity = target_count
             _log.info('set_robot_count: target=%d, raising robotsMaxQuantity to %d',
                        target_count, target_count)
         elif target_count < current:

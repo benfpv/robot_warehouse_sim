@@ -68,4 +68,5 @@ class Robot_Functions:
         carrying = -1
         carrier = -1
         robot = Robot(robotNumber, robotLog, timerCheckBattery, batteryPercent, batteryChargingRate, batteryDepletingRate, actionQueue, colour, area, xyLocation, areaTarget, xyLocationTarget, xyLocationDiff, direction, cardinal, velocity, status, carrying, carrier)
+        robot.birthLocation = xyLocationSpawn.copy()
         return robot
