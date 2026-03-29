@@ -2,7 +2,7 @@
 
 A real-time autonomous warehouse simulation. Robots dynamically pick up, transport, and deliver packages across import, storage, and export zones — managing battery, charging, and deadline priorities — all rendered in a live composite dashboard window.
 
-![robot_warehouse_sim](https://github.com/benfpv/robot_warehouse_sim/assets/55154673/d94b5d34-b65e-41d7-97d8-b29c454b6042)
+https://github.com/user-attachments/assets/5e9a1aa5-320e-4aa3-a2d9-9d493e5cc5b6
 
 ---
 
