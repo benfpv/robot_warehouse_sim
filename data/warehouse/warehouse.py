@@ -17,7 +17,6 @@ from data.warehouse.charger import *
 from data.warehouse.charger_functions import *
 from data.warehouse.robot import *
 from data.warehouse.robot_functions import *
-from data.warehouse.lane_planner import LanePathPlanner
 from data.warehouse.pathfinder import AStarPathfinder
 from data.warehouse.road_builder import RoadBuildJob
 from data.warehouse.warehouse_data import *
@@ -180,8 +179,6 @@ class Warehouse:
         self.warehouseWindowRes, self.warehouseWindowCenter, self.packagesInWarehouse, self.robotsInWarehouse, self.chargersInWarehouse, self.idleAreasInWarehouse, self.packageTargetsInWarehouse = Warehouse_Init.init_warehouseWindow(self.windowRes, self.windowCenter)
         self.zoneMap = Warehouse_Init.init_zoneMap(self.warehouseWindowRes)
         self.zoneMap_original = self.zoneMap.copy()  # reference for zone restoration
-        self.laneMap = None
-        self.lanePlanner = None
         # ── Objective traffic heatmap (simulation-authoritative) ──
         # traffic_total: lifetime cumulative visit count (never decays)
         # traffic_ema:   exponential moving average, fixed 60 s half-life
@@ -657,7 +654,6 @@ class Warehouse:
         self.numberOfStorageSlots = int(np.count_nonzero(self.zoneMap == ZONE_STORAGE))
         self.numberOfExportSlots  = int(np.count_nonzero(self.zoneMap == ZONE_EXPORT))
         self.packagesMaxQuantity  = self.numberOfImportSlots + self.numberOfStorageSlots + self.numberOfExportSlots
-        self.laneMap = None
 
     def update_flow_control(self):
         """Adaptive import cap based on fleet utilisation.
@@ -1724,8 +1720,6 @@ class Warehouse:
                                               self.robots[i].robotNumber, self.robots[i].batteryPercent,
                                               chargingStationLocation, _prev_task)
                                     self.robotsTaskAssignmentList.sort(key=lambda y: y[1], reverse=False)
-                                #print('- Robot #{}: Battery low'.format(i))
-                                #print('- robotTaskAssignmentIndex: {}'.format(robotTaskAssignmentIndex))
                     else:
                         chargerAvailable, c = self.find_available_charger(self.robots[i])
                         if (chargerAvailable == True):
@@ -1928,33 +1922,23 @@ class Warehouse:
         robot = self.robots[robot_index]
         _goal = [int(goal_xy[0]), int(goal_xy[1])]
         _grid_w, _grid_h = self.warehouseWindowRes[0], self.warehouseWindowRes[1]
-        _path = []
-        if getattr(self, 'lanePlanner', None) is not None and getattr(self, 'laneMap', None) is not None:
-            _path = self.lanePlanner.find_path(
-                robot.xyLocation,
-                _goal,
-                self.laneMap,
-                self.chargersInWarehouse,
-            )
-        if not _path:
-            # Fallback to geometric A* while lane infrastructure is still maturing.
-            _planner = AStarPathfinder()
-            # Pass current robot positions as soft-cost cells so A* routes
-            # around other robots (avoids head-on paths).
-            _other_robots = set()
-            for j, r in enumerate(self.robots):
-                if j != robot_index:
-                    _other_robots.add((int(r.xyLocation[0]), int(r.xyLocation[1])))
-            _path = _planner.find_path(
-                robot.xyLocation,
-                _goal,
-                _grid_w,
-                _grid_h,
-                self.chargersInWarehouse,
-                _other_robots,
-                road_map=self.road_map if self.road_map is not None else None,
-                traffic_ema=self.traffic_ema,
-            )
+        _planner = AStarPathfinder()
+        # Pass current robot positions as soft-cost cells so A* routes
+        # around other robots (avoids head-on paths).
+        _other_robots = set()
+        for j, r in enumerate(self.robots):
+            if j != robot_index:
+                _other_robots.add((int(r.xyLocation[0]), int(r.xyLocation[1])))
+        _path = _planner.find_path(
+            robot.xyLocation,
+            _goal,
+            _grid_w,
+            _grid_h,
+            self.chargersInWarehouse,
+            _other_robots,
+            road_map=self.road_map if self.road_map is not None else None,
+            traffic_ema=self.traffic_ema,
+        )
         robot.path = _path
         robot.pathTarget = _goal
         robot.pathAge = 0
@@ -1989,11 +1973,8 @@ class Warehouse:
                         packageAreaTarget = self.packages[packageIndex].areaTarget
                         packageStatus = self.packages[packageIndex].status
                         if (packageStatus == "move planned"):
-                            #print('- packageIndex: {}'.format(packageIndex))
                             packagePosition = self.packages[packageIndex].xyLocation
-                            #print('- packagePosition: {}'.format(str(packagePosition)))
                             robotTaskQuantity = self.robotsTaskAssignmentList[0][1]
-                            #print('- robotTaskQuantity: {}'.format(str(robotTaskQuantity)))
                             # Treat robots with only a "move to idle" task as available (0 real tasks)
                             _candidate_num = self.robotsTaskAssignmentList[0][0]
                             _candidate_r = next((r for r in self.robots if r.robotNumber == _candidate_num), None)
@@ -2021,8 +2002,6 @@ class Warehouse:
                                 _batt_avail = self.robots[robotIndex].batteryPercent - self._charge_threshold
                                 if _trip_cost > _batt_avail:
                                     continue
-                                #print('- self.robotsTaskAssignmentList: {}'.format(self.robotsTaskAssignmentList))
-                                #print('- self.robots[{}].actionQueue: {}'.format(robotNumber, self.robots[robotNumber].actionQueue))
                                 # Cancel idle-move if that's the only thing queued — it shouldn't block real work
                                 if (self.robots[robotIndex].actionQueue
                                         and len(self.robots[robotIndex].actionQueue) == 1
@@ -2044,12 +2023,6 @@ class Warehouse:
                                     self.robotsTaskAssignmentList.sort(key=lambda y: y[1], reverse=False) # Sort robotTasksAssignmentList by #tasks
                                     _log.debug('task assign: robot#%d -> pickup pkg#%d at %s',
                                                self.robots[robotIndex].robotNumber, packageNumber, packagePosition)
-
-            # If extra work is possible (i.e., export is blocked, storage is not entirely filled, and import packages can not be fit into MoveList), 
-        #print('-- post-update: ')
-        #print('- self.packagesMoveList: {}'.format(str(self.packagesMoveList)))
-        #print('- self.robotsTaskAssignmentList: {}'.format(str(self.robotsTaskAssignmentList)))
-        #print('- self.packagesMovingList: {}'.format(str(self.packagesMovingList)))
 
         return self.packagesMovingList, self.robots, self.robotsTaskAssignmentList, self.robotsLog
     
@@ -2435,10 +2408,8 @@ class Warehouse:
     def update_robots_charging(self):
         for i in range(len(self.robots)):
             if self.robots[i].actionQueue:
-                #print('- robotStatus: {}'.format(robotStatus))
                 if (self.robots[i].status == "move to charging station"):
                     robotTargetLocation = self.robots[i].actionQueue[0][0]
-                    #print("- robotTargetLocation: {}".format(robotTargetLocation))
                     _cs_matches = [x for x in self.chargers if x.xyLocation == robotTargetLocation]
                     if not _cs_matches:
                         continue  # charger moved or removed; skip safely
@@ -2446,7 +2417,6 @@ class Warehouse:
                     chargingStationNumber = chargingStation.chargerNumber
                     chargingStationLocation = chargingStation.xyLocation
                     chargingStationIndex = [i for i, x in enumerate(self.chargers) if x.chargerNumber == chargingStationNumber][0]
-                    #print('- chargingStationLocation: {}'.format(chargingStationLocation))
                     if (self.robots[i].xyLocation == chargingStationLocation): # Just arriving at charging station
                         if not self._robot_is_stopped(self.robots[i]):
                             self.robots[i].desiredVelocity = 0.0
@@ -2467,18 +2437,6 @@ class Warehouse:
                             self.chargers[chargingStationIndex].status = "charging"
                             self.robots[i].stallTicks = 40  # 1-second pause on charger engage
                             self.robots[i].hasCharged = True
-                        #chargingActionIndex = [i2 for i2, x in enumerate(self.robots[i].actionQueue) if "move to charging station" in x][0]
-                        #self.robots[i].actionQueue.pop(chargingActionIndex)
-                        #robotTaskAssignmentIndex = [x for x in self.robotsTaskAssignmentList if x[0] == i][0][0]
-                        #self.robotsTaskAssignmentList[robotTaskAssignmentIndex][1] -= 1
-                        ##print('- self.robots[i].actionQueue: {}'.format(self.robots[i].actionQueue))
-                        #self.robots[i].actionQueue.insert(0, [chargingStationLocation, "charging"])
-                        #self.robotsTaskAssignmentList[robotTaskAssignmentIndex][1] += 1
-                        ##print('- self.robots[i].actionQueue: {}'.format(self.robots[i].actionQueue))
-                        #self.robots[i].status = "charging"
-                        ##print('- self.robots[i].status: {}'.format(self.robots[i].status))
-                        #self.robots[i].robotLog.append(Robot_Log('charging', self.datetimeNow))
-                        #self.robotsLog.append(Robots_Log(self.robots[i].robotNumber, self.robots[i], 'charging', self.datetimeNow))
                 elif (self.robots[i].status == "charging"):
                     robotTargetLocation = self.robots[i].actionQueue[0][0]
                     _cs_matches = [x for x in self.chargers if x.xyLocation == robotTargetLocation]
@@ -2495,22 +2453,6 @@ class Warehouse:
                             self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, "charging")
                             self.chargers[chargingStationIndex].status = "idle"
                             self.robots[i].stallTicks = 40  # 1-second pause on charger disengage
-                            #chargingActionIndex = [i2 for i2, x in enumerate(self.robots[i].actionQueue) if "charging" in x][0]
-                            #self.robots[i].actionQueue.pop(chargingActionIndex)
-                            #robotTaskAssignmentIndex = [x for x in self.robotsTaskAssignmentList if x[0] == i][0][0]
-                            ##print('- robotTaskAssignmentIndex: {}'.format(robotTaskAssignmentIndex))
-                            #self.robotsTaskAssignmentList[robotTaskAssignmentIndex][1] -= 1
-                            #if not self.robots[i].actionQueue:
-                            #    self.robots[i].status = 'idle'
-                            #    self.robots[i].robotLog.append(Robot_Log('idle', self.datetimeNow))
-                            #    self.robotsLog.append(Robots_Log(self.robots[i].robotNumber, self.robots[i], 'idle', self.datetimeNow))
-                            #else:
-                            #    #print('- self.robots[i].actionQueue: {}'.format(self.robots[i].actionQueue))
-                            #    robotNewStatus = self.robots[i].actionQueue[0][1]
-                            #    self.robots[i].status = robotNewStatus
-                            #    #print('- self.robots[i].status: {}'.format(self.robots[i].status))
-                            #    self.robots[i].robotLog.append(Robot_Log(robotNewStatus, self.datetimeNow))
-                            #    self.robotsLog.append(Robots_Log(self.robots[i].robotNumber, self.robots[i], robotNewStatus, self.datetimeNow))
         return self.robots, self.robotsTaskAssignmentList, self.robotsLog, self.chargers
 
     def update_robots_target_reached(self):
@@ -2528,13 +2470,6 @@ class Warehouse:
                             packageIndex = packageIndex[0]
                             packageLocation = self.packages[packageIndex].xyLocation
                             packageLocationTarget = self.packages[packageIndex].xyLocationTarget
-                            #print("- packageIndex: {}".format(packageIndex))
-                            #print("- robotLocation: {}".format(currentLocation))
-                            #print("- packageLocation: {}".format(packageLocation))
-                            #print("- packageLocationTarget: {}".format(packageLocationTarget))
-                            #print("- self.robots[i].status: {}".format(self.robots[i].status))
-                            #print("- self.packages[packageIndex].status: {}".format(self.packages[packageIndex].status))
-                            #print("- self.packages[packageIndex].xyLocation: {}".format(self.packages[packageIndex].xyLocation))
                             if currentLocation == packageLocation:
                                 if (self.robots[i].status != "carried") and (self.packages[packageIndex].status != "carried"):
                                     self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_replace_task(i, "move to target pickup location", currentLocation, "pick up target package")
@@ -2588,13 +2523,6 @@ class Warehouse:
                                     _log.info('pickup blocked: robot#%d batt=%.1f%% too low for pkg#%d',
                                               self.robots[i].robotNumber, self.robots[i].batteryPercent, packageNumber)
                                     continue
-                                #print('--- pick up target package ---')
-                                #print('- self.packagesMoveList: {}'.format(str(self.packagesMoveList)))
-                                #print('- self.packagesMovingList: {}'.format(str(self.packagesMovingList)))
-                                #print('- self.robotsTaskAssignmentList: {}'.format(str(self.robotsTaskAssignmentList)))
-                                #print('- packageNumber: {}'.format(str(packageNumber)))
-                                #print('- robotNumber: {}'.format(str(self.robots[i].robotNumber)))
-                                #print('- actionQueue: {}'.format(str(self.robots[i].actionQueue)))
                                 self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_replace_task(i, "pick up target package", packageLocationTarget, "move to target dropoff location")
                                 self.robots[i].carrying = packageNumber
                                 self.robots[i].stallTicks = 40  # 1-second pause on pickup
@@ -2603,12 +2531,6 @@ class Warehouse:
                                 self.packages[packageIndex].carrier = robotNumber
                                 _log.debug('pickup: robot#%d picked pkg#%d at %s -> dropoff %s',
                                            robotNumber, packageNumber, list(currentLocation), list(packageLocationTarget))
-                                #print('- self.packagesMoveList: {}'.format(str(self.packagesMoveList)))
-                                #print('- self.packagesMovingList: {}'.format(str(self.packagesMovingList)))
-                                #print('- self.robotsTaskAssignmentList: {}'.format(str(self.robotsTaskAssignmentList)))
-                                #print('- packageNumber: {}'.format(str(packageNumber)))
-                                #print('- robotNumber: {}'.format(str(self.robots[i].robotNumber)))
-                                #print('- actionQueue: {}'.format(str(self.robots[i].actionQueue)))
 
                     elif (self.robots[i].actionQueue[0][0] == currentLocation) and (self.robots[i].actionQueue[0][1] == "drop off target package"):
                         # Find the package being dropped off by robot.carrying, not by
@@ -2622,13 +2544,6 @@ class Warehouse:
                             packageNumber = self.packages[packageIndex].packageNumber
                             packageLocationTarget = self.packages[packageIndex].xyLocationTarget
                             if (self.robots[i].status != "carried") and (self.packages[packageIndex].status == "carried"):
-                                #print('--- drop off target package ---')
-                                #print('- self.packagesMoveList: {}'.format(str(self.packagesMoveList)))
-                                #print('- self.packagesMovingList: {}'.format(str(self.packagesMovingList)))
-                                #print('- self.robotsTaskAssignmentList: {}'.format(str(self.robotsTaskAssignmentList)))
-                                #print('- packageNumber: {}'.format(str(packageNumber)))
-                                #print('- robotNumber: {}'.format(str(self.robots[i].robotNumber)))
-                                #print('- actionQueue: {}'.format(str(self.robots[i].actionQueue)))
                                 self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, "drop off target package")
                                 self.robots[i].carrying = -1
                                 self.robots[i].stallTicks = 40  # 1-second pause on dropoff
@@ -2636,13 +2551,6 @@ class Warehouse:
                                 _log.debug('dropoff: robot#%d dropped pkg#%d at %s  area=%s',
                                            self.robots[i].robotNumber, packageNumber, list(currentLocation),
                                            self.packages[next((y for y, x in enumerate(self.packages) if x.packageNumber == packageNumber), -1)].area if any(x.packageNumber == packageNumber for x in self.packages) else 'exported')
-                                #print('- self.packagesMoveList: {}'.format(str(self.packagesMoveList)))
-                                #print('- self.packagesMovingList: {}'.format(str(self.packagesMovingList)))
-                                #print('- self.robotsTaskAssignmentList: {}'.format(str(self.robotsTaskAssignmentList)))
-                                #print('- packageNumber: {}'.format(str(packageNumber)))
-                                #print('- robotNumber: {}'.format(str(self.robots[i].robotNumber)))
-                                #print('- actionQueue: {}'.format(str(self.robots[i].actionQueue)))
-                                #exit()
         
         return self.packages, self.packagesMoveList, self.packagesMovingList, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount, self.robots, self.robotsTaskAssignmentList, self.robotsLog
     
@@ -2692,9 +2600,6 @@ class Warehouse:
         self.robots[robotIndex].robotLog.append(Robot_Log(robotNewAction, self.datetimeNow))
         self.robotsLog.append(Robots_Log(self.robots[robotIndex].robotNumber, self.robots[robotIndex], robotNewAction, self.datetimeNow))
         self.robotsTaskAssignmentList.sort(key=lambda y: y[1], reverse=False) # Sort robotTasksAssignmentList by #tasks
-        #print('- self.robots[{}].robotNumber: {}'.format(robotIndex, self.robots[robotIndex].robotNumber))
-        #print('- self.robots[{}].actionQueue: {}'.format(robotIndex, self.robots[robotIndex].actionQueue))
-        #print('- thisTaskAssignment: {}'.format(self.robotsTaskAssignmentList[robotTaskAssignmentIndex]))
         return self.robots[robotIndex], self.robotsTaskAssignmentList, self.robotsLog
     
     def robot_pop_task(self, robotIndex, robotActionToPop):
@@ -2706,7 +2611,6 @@ class Warehouse:
         robotActionIndex = _matches[0]
         self.robots[robotIndex].actionQueue.pop(robotActionIndex)
         robotTaskAssignmentIndex = [y for y, x in enumerate(self.robotsTaskAssignmentList) if x[0] == robotNumber][0]
-        #print('- robotTaskAssignmentIndex: {}'.format(robotTaskAssignmentIndex))
         self.robotsTaskAssignmentList[robotTaskAssignmentIndex][1] -= 1
         if not self.robots[robotIndex].actionQueue:
             self.robots[robotIndex].status = "idle"
@@ -2716,16 +2620,11 @@ class Warehouse:
             if self.robots[robotIndex].decommissioning:
                 self._queue_exit_task(robotIndex)
         else:
-            #print('- self.robots[robotIndex].actionQueue: {}'.format(self.robots[robotIndex].actionQueue))
             robotNewStatus = self.robots[robotIndex].actionQueue[0][1]
             self.robots[robotIndex].status = robotNewStatus
-            #print('- self.robots[robotIndex].status: {}'.format(self.robots[robotIndex].status))
             self.robots[robotIndex].robotLog.append(Robot_Log(robotNewStatus, self.datetimeNow))
             self.robotsLog.append(Robots_Log(self.robots[robotIndex].robotNumber, self.robots[robotIndex], robotNewStatus, self.datetimeNow))
         self.robotsTaskAssignmentList.sort(key=lambda y: y[1], reverse=False) # Sort robotTasksAssignmentList by #tasks
-        #print('- self.robots[{}].robotNumber: {}'.format(robotIndex, self.robots[robotIndex].robotNumber))
-        #print('- self.robots[{}].actionQueue: {}'.format(robotIndex, self.robots[robotIndex].actionQueue))
-        #print('- thisTaskAssignment: {}'.format(self.robotsTaskAssignmentList[robotTaskAssignmentIndex]))
         return self.robots[robotIndex], self.robotsTaskAssignmentList, self.robotsLog
         
     def robot_replace_task(self, robotIndex, robotActionToPop, robotNewLocation, robotNewAction):
@@ -2738,16 +2637,10 @@ class Warehouse:
         self.robots[robotIndex].actionQueue.pop(robotActionIndex)
         robotTaskAssignmentIndex = [y for y, x in enumerate(self.robotsTaskAssignmentList) if x[0] == robotNumber][0]
         self.robotsTaskAssignmentList[robotTaskAssignmentIndex][1] -= 1
-        #print('- self.robots[robotIndex].actionQueue: {}'.format(self.robots[robotIndex].actionQueue))
         self.robots[robotIndex].actionQueue.insert(robotActionIndex, [robotNewLocation, robotNewAction])
         self.robotsTaskAssignmentList[robotTaskAssignmentIndex][1] += 1
-        #print('- self.robots[robotIndex].actionQueue: {}'.format(self.robots[robotIndex].actionQueue))
         self.robots[robotIndex].status = robotNewAction
-        #print('- self.robots[robotIndex].status: {}'.format(self.robots[robotIndex].status))
         self.robots[robotIndex].robotLog.append(Robot_Log(robotNewAction, self.datetimeNow))
         self.robotsLog.append(Robots_Log(self.robots[robotIndex].robotNumber, self.robots[robotIndex], robotNewAction, self.datetimeNow))
         self.robotsTaskAssignmentList.sort(key=lambda y: y[1], reverse=False) # Sort robotTasksAssignmentList by #tasks
-        #print('- self.robots[{}].robotNumber: {}'.format(robotIndex, self.robots[robotIndex].robotNumber))
-        #print('- self.robots[{}].actionQueue: {}'.format(robotIndex, self.robots[robotIndex].actionQueue))
-        #print('- thisTaskAssignment: {}'.format(self.robotsTaskAssignmentList[robotTaskAssignmentIndex]))
         return self.robots[robotIndex], self.robotsTaskAssignmentList, self.robotsLog

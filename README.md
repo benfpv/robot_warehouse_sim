@@ -202,7 +202,6 @@ robot_warehouse_sim/
         ├── warehouse_log.py         # Log record classes (Packages_Log, Robots_Log)
         ├── pathfinder.py            # A* pathfinder with road preference and traffic awareness
         ├── road_builder.py          # Physarum-inspired organic road network builder
-        ├── lane_planner.py          # Lane-based path planner (legacy)
         ├── package.py               # Package dataclass
         ├── package_functions.py     # Package spawn, target selection, deadline generation
         ├── charger.py               # Charger dataclass
