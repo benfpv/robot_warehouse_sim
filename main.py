@@ -108,7 +108,7 @@ class MainGame:
             self.warehouse_windowArray,
             self.itemsList,
             self.addressesList,
-            robotsMaxQuantity=3,
+            robotsMaxQuantity=18,
         )
 
         # Optimizer (strategy pattern — zone rebalancing first, future: charger/robot)
@@ -136,6 +136,7 @@ class MainGame:
             _loaded = MapImporter.load(_map_path, gw, gh)
             if _loaded is not None:
                 self.warehouse.zoneMap = _loaded
+                self.warehouse.zoneMap_original = _loaded.copy()
                 self.warehouse.update_zone_counts()
                 print("[main] Zone map applied from '{}'.".format(_map_path))
 
@@ -203,6 +204,10 @@ class MainGame:
         # Optimizer action log: ring buffer of (timestamp, action_str), newest last
         self._opt_log: list = []
         self._last_seen_opt_str = ''
+        # Heatmap overlay toggles
+        self._show_heatmap = True
+        self._show_roads = True
+        self._show_plazas = True
         screen_w, screen_h = Display_Functions.get_screen_resolution()
         cx = (screen_w - self.composite_windowRes[0]) // 2
         cy = (screen_h - self.composite_windowRes[1]) // 2
@@ -224,6 +229,8 @@ class MainGame:
         if self._handle_robot_count_click(event, px, py):
             return
         if self._handle_pkg_target_mode_click(event, px, py):
+            return
+        if self._handle_heatmap_toggle_click(event, px, py):
             return
         self.paint_handler.on_mouse(event, px, py, flags, param)
 
@@ -389,6 +396,47 @@ class MainGame:
                 elif action == '-' and target > 1:
                     self.warehouse.set_robot_count(target - 1)
                     print('[main] Robot target -> {} (-1)'.format(target - 1))
+                return True
+        return False
+
+    # ── Heatmap overlay toggle buttons ──────────────────────────────────
+
+    def _heatmap_toggle_button_layout(self):
+        """Return [(key, label, bx0, by0, bx1, by1), ...] for heatmap/road/plaza toggles.
+
+        Anchored to the bottom of the TRAFFIC HEATMAP panel, evenly spaced.
+        """
+        mw = self.warehouse_windowRes[0]  # 320
+        sw = self.sub_windowRes[0]        # 160
+        sh = self.sub_windowRes[1]        # 140
+        btn_h = 11
+        pad_x = 4
+        pad_y = 3
+        gap = 3
+        # Panel bottom: y = 2*sh (second row ends there)
+        y1 = 2 * sh - pad_y
+        y0 = y1 - btn_h
+        x_left = mw + sw * 2 + pad_x
+        x_right = mw + sw * 3 - pad_x
+        usable = x_right - x_left - gap * 2
+        btn_w = usable // 3
+        return [
+            ('heatmap', 'HM',  x_left,                          y0, x_left + btn_w,              y1),
+            ('roads',   'RD',  x_left + btn_w + gap,            y0, x_left + btn_w * 2 + gap,    y1),
+            ('plazas',  'PLZ', x_left + btn_w * 2 + gap * 2,    y0, x_right,                     y1),
+        ]
+
+    def _handle_heatmap_toggle_click(self, event, px, py):
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return False
+        for key, _lbl, bx0, by0, bx1, by1 in self._heatmap_toggle_button_layout():
+            if bx0 <= px < bx1 and by0 <= py < by1:
+                if key == 'roads':
+                    self._show_roads = not self._show_roads
+                elif key == 'plazas':
+                    self._show_plazas = not self._show_plazas
+                elif key == 'heatmap':
+                    self._show_heatmap = not self._show_heatmap
                 return True
         return False
 
@@ -567,6 +615,16 @@ class MainGame:
         _sub_cell = min(_sub_sx, _sub_sy)
         _sub_r    = max(int(_sub_cell * 0.55), 1)
 
+        # Subtle dark-grey road underlay on robots panel
+        _road_rb = self.warehouse.road_map
+        if _road_rb is not None and _road_rb.any():
+            _road_rb_rsz = cv2.resize(_road_rb, (sw, sh), interpolation=cv2.INTER_NEAREST)
+            _rb_panel = composite[sh:2*sh, mw:mw+sw]
+            _rb_road_mask = _road_rb_rsz > 0
+            # Lighten road cells very subtly: dark grey tint over the black background
+            _rb_panel[_rb_road_mask] = np.clip(
+                _rb_panel[_rb_road_mask].astype(np.int16) + 30, 0, 255).astype(np.uint8)
+
         # Speed-profile legend: tiny horizontal gradient bar (slow→fast).
         _sp_x0 = _sub_ox + sw - 50
         _sp_y0 = _sub_oy + sh - 10
@@ -678,7 +736,7 @@ class MainGame:
         # glow even when no robot is currently there, without hiding the JET colours.
         _slow_src = self.warehouse.traffic_total.astype(np.float32)
         _slow_max = _slow_src.max()
-        if _slow_max > 0:
+        if self._show_heatmap and _slow_max > 0:
             _slow_visited = _slow_src > 0
             _slow_pct  = float(np.percentile(_slow_src[_slow_visited], 98)) if _slow_visited.any() else _slow_max
             _slow_clip = max(_slow_pct, _slow_max * 0.05)
@@ -691,22 +749,47 @@ class MainGame:
             composite[sh:2*sh, mw+sw*2:mw+sw*3] = cv2.addWeighted(
                 composite[sh:2*sh, mw+sw*2:mw+sw*3], 1.0, _slow_ov, 0.30, 0)
 
-        # Road network overlay — MST-derived lanes drawn on top of heatmap.
-        # Road cells: pure white; hotspot centroids: bright green dots.
+        # Road network overlay — subtle semi-transparent over heatmap.
+        # Blended so the heatmap colours remain clearly visible underneath.
         _road = self.warehouse.road_map
-        if _road is not None and _road.any():
+        if self._show_roads and _road is not None and _road.any():
             _road_rsz = cv2.resize(_road, (sw, sh), interpolation=cv2.INTER_NEAREST)
-            _road_mask = _road_rsz > 0
             _panel = composite[sh:2*sh, mw+sw*2:mw+sw*3]
-            _panel[_road_mask] = (255, 255, 255)
-            # Hotspot centroids as bright green dots
+            # Build a white overlay with per-tier alpha intensity
+            _road_alpha = np.zeros((sh, sw), dtype=np.float32)
+            _road_alpha[_road_rsz == 1] = 0.20   # branches: faint
+            _road_alpha[_road_rsz == 2] = 0.30   # collectors: visible
+            _road_alpha[_road_rsz >= 3] = 0.42   # arterials: clear but not opaque
+            _alpha_3ch = _road_alpha[:, :, np.newaxis]
+            _white = np.full_like(_panel, 255, dtype=np.uint8)
+            _panel[:] = np.clip(
+                _panel.astype(np.float32) * (1.0 - _alpha_3ch) + _white.astype(np.float32) * _alpha_3ch,
+                0, 255).astype(np.uint8)
+            # Hotspot dots — small, semi-transparent
             _sx = sw / max(self.warehouse_res[0], 1)
             _sy = sh / max(self.warehouse_res[1], 1)
-            for _hx, _hy in self.warehouse.road_hotspots:
+            _hs_list = self.warehouse.road_hotspots
+            _hs_top = _hs_list[0][2] if _hs_list else 1.0
+            for _hx, _hy, _hi in _hs_list:
                 _px = int(_hx * _sx + _sx * 0.5)
-                _py = int(_hy * _sy + _sy * 0.5) + sh  # offset into row 1
+                _py = int(_hy * _sy + _sy * 0.5) + sh
                 if 0 <= _px < sw and sh <= _py < 2 * sh:
-                    cv2.circle(composite, (mw + sw * 2 + _px, _py), 2, (0, 255, 0), -1)
+                    _ratio = _hi / max(_hs_top, 1e-9)
+                    _hcol = (0, 220, 80) if _ratio >= 0.5 else (160, 160, 0)
+                    cv2.circle(composite, (mw + sw * 2 + _px, _py), 1, _hcol, -1)
+
+        # Plaza overlay — tinted area fill (distinct from road lines)
+        _plaza = self.warehouse.plaza_map
+        if self._show_plazas and _plaza is not None and _plaza.any():
+            _plz_rsz = cv2.resize(_plaza, (sw, sh), interpolation=cv2.INTER_NEAREST)
+            _panel = composite[sh:2*sh, mw+sw*2:mw+sw*3]
+            _plz_mask = _plz_rsz > 0
+            _plz_tint = np.array([180, 140, 60], dtype=np.float32)  # warm amber (BGR)
+            _plz_alpha = 0.25
+            _panel[_plz_mask] = np.clip(
+                _panel[_plz_mask].astype(np.float32) * (1.0 - _plz_alpha)
+                + _plz_tint * _plz_alpha,
+                0, 255).astype(np.uint8)
 
         # Package targets sub-view: arrows on blank canvas, target dots stamped on top
         sub_scale = sw // self.warehouse_res[0]  # 2
@@ -1048,6 +1131,23 @@ class MainGame:
         ]
         for _ttxt, _tx, _ty in _titles:
             cv2.putText(composite, _ttxt, (_tx, _ty + 8), _tfont, 0.28, _tcol, 1)
+
+        # Heatmap overlay toggle buttons (HM / RD / PLZ)
+        _tog_style_on  = {'bg': (24, 32, 28), 'edge': (80, 170, 120), 'text': (140, 220, 170)}
+        _tog_style_off = {'bg': (18, 18, 18), 'edge': (42, 42, 42),   'text': (75, 75, 75)}
+        _tog_state = {'heatmap': self._show_heatmap, 'roads': self._show_roads, 'plazas': self._show_plazas}
+        for key, label, bx0, by0, bx1, by1 in self._heatmap_toggle_button_layout():
+            _active = _tog_state.get(key, False)
+            _st = _tog_style_on if _active else _tog_style_off
+            composite[by0:by1, bx0:bx1] = _st['bg']
+            composite[by0:by1, bx0:bx0 + 1] = _st['edge']
+            composite[by0:by1, bx1 - 1:bx1] = _st['edge']
+            composite[by0:by0 + 1, bx0:bx1] = _st['edge']
+            composite[by1 - 1:by1, bx0:bx1] = _st['edge']
+            (_tw, _th), _ = cv2.getTextSize(label, _tfont, 0.22, 1)
+            _btx = bx0 + max((bx1 - bx0 - _tw) // 2, 1)
+            _bty = by0 + (by1 - by0 + _th) // 2
+            cv2.putText(composite, label, (_btx, _bty), _tfont, 0.22, _st['text'], 1)
 
         # Zone labels — colour-keyed legend in corner of each view
         _zfont = cv2.FONT_HERSHEY_SIMPLEX

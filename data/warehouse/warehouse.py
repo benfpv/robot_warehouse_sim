@@ -19,7 +19,7 @@ from data.warehouse.robot import *
 from data.warehouse.robot_functions import *
 from data.warehouse.lane_planner import LanePathPlanner
 from data.warehouse.pathfinder import AStarPathfinder
-from data.warehouse.road_builder import build_road_network
+from data.warehouse.road_builder import RoadBuildJob
 from data.warehouse.warehouse_data import *
 
 ZONE_NONE = 0
@@ -178,6 +178,7 @@ class Warehouse:
         self.warehousePerimeterCoordinates, self.warehousePerimeterCoordinatesMinusOne = Warehouse_Init.init_warehousePerimeter(self.windowRes)
         self.warehouseWindowRes, self.warehouseWindowCenter, self.packagesInWarehouse, self.robotsInWarehouse, self.chargersInWarehouse, self.idleAreasInWarehouse, self.packageTargetsInWarehouse = Warehouse_Init.init_warehouseWindow(self.windowRes, self.windowCenter)
         self.zoneMap = Warehouse_Init.init_zoneMap(self.warehouseWindowRes)
+        self.zoneMap_original = self.zoneMap.copy()  # reference for zone restoration
         self.laneMap = None
         self.lanePlanner = None
         # ── Objective traffic heatmap (simulation-authoritative) ──
@@ -190,8 +191,13 @@ class Warehouse:
         self._traffic_last_time = time.time()
         # ── Road map (derived from traffic_total, display-only for now) ──
         self.road_map = np.zeros((_gh, _gw), dtype=np.uint8)
+        self._road_map_prev = np.zeros((_gh, _gw), dtype=np.uint8)
+        self.plaza_map = np.zeros((_gh, _gw), dtype=np.uint8)
+        self._plaza_map_prev = np.zeros((_gh, _gw), dtype=np.uint8)
         self.road_hotspots = []   # list of (x, y) centroids
         self.road_edges    = []   # MST edge index-pairs into road_hotspots
+        self._road_flow    = None # persistent flow accumulator for incremental updates
+        self._road_job     = None # in-progress RoadBuildJob (frame-distributed)
         self._road_rebuild_count = 0        # how many times we've rebuilt
         self._road_last_rebuild = 0.0       # wall-clock time of last rebuild
         self.numberOfImportSlots  = int(np.count_nonzero(self.zoneMap == ZONE_IMPORT))
@@ -455,23 +461,116 @@ class Warehouse:
     _TRAFFIC_EMA_HL = 60.0  # seconds – fixed half-life for EMA layer
 
     def _maybe_rebuild_roads(self):
-        """Rebuild road network from traffic_total periodically.
+        """Step the frame-distributed road builder.
 
-        Rebuild interval adapts: fast early (2 s) so roads appear quickly
-        and respond to initial patterns, slowing to 10 s as the network
-        matures (less churn once traffic patterns stabilise).
+        If a job is running, advance it by a few A* paths (~3).  When it
+        finishes, harvest the result.  If no job is running, check whether
+        enough time has passed to start a new one.
+
+        This keeps per-frame cost at ~3-5 ms instead of ~70 ms all at once.
         """
+        # ── advance in-progress job ─────────────────────────────────────
+        if self._road_job is not None:
+            self._road_job.step()          # default 3 A* paths
+            if self._road_job.done:
+                self._road_map_prev = self.road_map.copy()
+                self._plaza_map_prev = self.plaza_map.copy()
+                self.road_map, self.road_hotspots, self.road_edges, self._road_flow, self.plaza_map = self._road_job.result()
+                self._apply_road_zone_erasure()
+                self._road_job = None
+            return
+
+        # ── start new job? ──────────────────────────────────────────────
         now = time.time()
-        # Adaptive interval: 2s for first 10 rebuilds, ramps to 10s by rebuild 30
-        interval = min(2.0 + self._road_rebuild_count * 0.27, 10.0)
+        interval = min(2.0 + self._road_rebuild_count * 0.2, 6.0)
         if now - self._road_last_rebuild < interval:
             return
         if self.traffic_total.max() == 0:
             return
+        # Wait until every robot has charged at least once before building roads
+        if self.robots and not all(r.hasCharged for r in self.robots):
+            return
         self._road_last_rebuild = now
         self._road_rebuild_count += 1
-        self.road_map, self.road_hotspots, self.road_edges = build_road_network(
-            self.traffic_total, self.zoneMap)
+        self._road_job = RoadBuildJob(
+            self.traffic_total, self.zoneMap,
+            self.traffic_ema, self.chargersInWarehouse,
+            self._road_flow)
+        self._road_job.step()  # start first batch immediately
+
+    def _apply_road_zone_erasure(self):
+        """Erase zones under road/plaza cells; restore zones on freed cells.
+
+        When a road/plaza is built on a zone cell, the zone is cleared to
+        neutral.  When a road/plaza disappears, the zone is restored from
+        the original map — but only if that zone type is below its efficient
+        target proportion (20 % import, 45 % storage, 35 % export).
+        Idle packages on road/plaza cells are force-added to the move list.
+        """
+        _TARGET_RATIOS = {
+            ZONE_IMPORT:  0.20,
+            ZONE_STORAGE: 0.45,
+            ZONE_EXPORT:  0.35,
+        }
+
+        cur_covered = (self.road_map > 0) | (self.plaza_map > 0)
+        prev_covered = (self._road_map_prev > 0) | (self._plaza_map_prev > 0)
+
+        # ── 1. Erase zones under NEW road/plaza cells ──────────────────
+        new_roads = cur_covered & ~prev_covered
+        erase = new_roads & (self.zoneMap != 0)
+        if erase.any():
+            self.zoneMap[erase] = 0
+
+        # Also ensure ALL current road/plaza cells are neutral
+        still_covered = cur_covered & (self.zoneMap != 0)
+        if still_covered.any():
+            self.zoneMap[still_covered] = 0
+
+        # ── 2. Restore zones on FREED cells (was road, now isn't) ──────
+        freed = prev_covered & ~cur_covered
+        if freed.any():
+            # Which freed cells had zones in the original map?
+            orig_zones = self.zoneMap_original[freed]
+            restorable = orig_zones > 0
+            if restorable.any():
+                # Current zone counts (excluding road/plaza cells)
+                n_import  = int(np.count_nonzero(self.zoneMap == ZONE_IMPORT))
+                n_storage = int(np.count_nonzero(self.zoneMap == ZONE_STORAGE))
+                n_export  = int(np.count_nonzero(self.zoneMap == ZONE_EXPORT))
+                n_total   = max(n_import + n_storage + n_export, 1)
+
+                # Deficit: how far below target each zone type is
+                deficit = {}
+                for zid, target_ratio in _TARGET_RATIOS.items():
+                    current_count = {ZONE_IMPORT: n_import, ZONE_STORAGE: n_storage, ZONE_EXPORT: n_export}[zid]
+                    target_count = target_ratio * n_total
+                    deficit[zid] = max(target_count - current_count, 0)
+
+                # Restore freed cells — prioritize zones with largest deficit
+                freed_ys, freed_xs = np.where(freed)
+                for fy, fx in zip(freed_ys, freed_xs):
+                    orig_z = self.zoneMap_original[fy, fx]
+                    if orig_z == 0:
+                        continue
+                    # Only restore if this zone type has a deficit
+                    if deficit.get(orig_z, 0) > 0:
+                        self.zoneMap[fy, fx] = orig_z
+                        deficit[orig_z] -= 1
+
+        self.update_zone_counts()
+
+        # ── 3. Evict idle packages sitting on road/plaza cells ─────────
+        for pkg in self.packages:
+            if pkg.status != 'idle':
+                continue
+            px, py = pkg.xyLocation
+            if not cur_covered[py, px]:
+                continue
+            if (pkg.packageNumber in self.packagesMoveList
+                    or pkg.packageNumber in self.packagesMovingList):
+                continue
+            self.packagesMoveList.insert(0, pkg.packageNumber)
 
     def _update_traffic_heatmap(self):
         """Accumulate objective robot traffic into simulation-authoritative heatmaps.
@@ -488,7 +587,8 @@ class Warehouse:
         if dt > 0:
             self.traffic_ema *= 0.5 ** (dt / self._TRAFFIC_EMA_HL)
         for rb in self.robots:
-            if rb.status not in _STATIC:
+            # Only count robots that are actively moving and have carried at least once
+            if (rb.velocity > 0 and rb.hasCarried):
                 rx, ry = rb.xyLocation
                 self.traffic_total[ry, rx] += 1
                 self.traffic_ema[ry, rx]   += 1.0
@@ -2143,6 +2243,15 @@ class Warehouse:
             robot = self.robots[i]
             robot.pathAge += 1
             robot.replanCooldownTicks = max(0, robot.replanCooldownTicks - 1)
+
+            # ── Stall pause (pickup / dropoff / charger engage-disengage)
+            if robot.stallTicks > 0:
+                robot.stallTicks -= 1
+                robot.velocity = 0.0
+                robot.desiredVelocity = 0.0
+                robot.movementProgress = 0.0
+                continue
+
             _hist = list(robot.recentLocations)
             _start = tuple(robot.xyLocation)
             _occupied.discard(_start)
@@ -2198,7 +2307,18 @@ class Warehouse:
                 # ── Desired speed ──────────────────────────────────────
                 _desired = float(robot.maxVelocity)
                 if robot.carrying != -1:
-                    _desired *= 0.92
+                    _desired *= 0.90
+
+                # Tiered speed based on road tier and zone
+                _road_tier = self.road_map[_cy, _cx]
+                if _road_tier >= 2:           # collector / arterial: full speed
+                    pass
+                elif _road_tier == 1:         # branch road: slight slowdown
+                    _desired *= 0.85
+                elif self.zoneMap[_cy, _cx] == 0:  # neutral corridor, no road
+                    _desired *= 0.70
+                else:                         # inside zone, no road (shelves)
+                    _desired *= 0.35
 
                 # Battery limp mode
                 _lt = self._limp_mode_batt_pct
@@ -2246,8 +2366,10 @@ class Warehouse:
                     robot.velocity = robot.minMovingVelocity
 
                 # ── Movement step ──────────────────────────────────────
+                _diagonal = (_dx != 0 and _dy != 0)
+                _step_cost = 1.414 if _diagonal else 1.0
                 robot.movementProgress += robot.velocity
-                if int(robot.movementProgress) >= 1 and (_dx or _dy):
+                if robot.movementProgress >= _step_cost and (_dx or _dy):
                     _nx, _ny = _cx + _dx, _cy + _dy
                     _nc = (_nx, _ny)
 
@@ -2285,7 +2407,7 @@ class Warehouse:
                                     robot.xyLocation[0] = _sx
                                     robot.xyLocation[1] = _sy
                                     _occupied.add((_sx, _sy))
-                                    robot.movementProgress -= 1.0
+                                    robot.movementProgress -= _step_cost
                                     robot.blockedTicks = 0
                                     _moved = True
                                     _yielded = True
@@ -2314,7 +2436,7 @@ class Warehouse:
                         robot.xyLocation[0] = _nx
                         robot.xyLocation[1] = _ny
                         _occupied.add(_nc)
-                        robot.movementProgress -= 1.0
+                        robot.movementProgress -= _step_cost
                         robot.blockedTicks = 0
                         _moved = True
 
@@ -2472,6 +2594,8 @@ class Warehouse:
                         else:
                             self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_replace_task(i, "move to charging station", chargingStationLocation, "charging")
                             self.chargers[chargingStationIndex].status = "charging"
+                            self.robots[i].stallTicks = 40  # 1-second pause on charger engage
+                            self.robots[i].hasCharged = True
                         #chargingActionIndex = [i2 for i2, x in enumerate(self.robots[i].actionQueue) if "move to charging station" in x][0]
                         #self.robots[i].actionQueue.pop(chargingActionIndex)
                         #robotTaskAssignmentIndex = [x for x in self.robotsTaskAssignmentList if x[0] == i][0][0]
@@ -2499,6 +2623,7 @@ class Warehouse:
                         else: # Just leaving charging station
                             self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, "charging")
                             self.chargers[chargingStationIndex].status = "idle"
+                            self.robots[i].stallTicks = 40  # 1-second pause on charger disengage
                             #chargingActionIndex = [i2 for i2, x in enumerate(self.robots[i].actionQueue) if "charging" in x][0]
                             #self.robots[i].actionQueue.pop(chargingActionIndex)
                             #robotTaskAssignmentIndex = [x for x in self.robotsTaskAssignmentList if x[0] == i][0][0]
@@ -2601,6 +2726,8 @@ class Warehouse:
                                 #print('- actionQueue: {}'.format(str(self.robots[i].actionQueue)))
                                 self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_replace_task(i, "pick up target package", packageLocationTarget, "move to target dropoff location")
                                 self.robots[i].carrying = packageNumber
+                                self.robots[i].stallTicks = 40  # 1-second pause on pickup
+                                self.robots[i].hasCarried = True
                                 self.packages[packageIndex].status = "carried"
                                 self.packages[packageIndex].carrier = robotNumber
                                 _log.debug('pickup: robot#%d picked pkg#%d at %s -> dropoff %s',
@@ -2633,6 +2760,7 @@ class Warehouse:
                                 #print('- actionQueue: {}'.format(str(self.robots[i].actionQueue)))
                                 self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, "drop off target package")
                                 self.robots[i].carrying = -1
+                                self.robots[i].stallTicks = 40  # 1-second pause on dropoff
                                 self.packagesMoveList, self.packagesMovingList, self.packages, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount = self.package_dropoff(packageNumber)
                                 _log.debug('dropoff: robot#%d dropped pkg#%d at %s  area=%s',
                                            self.robots[i].robotNumber, packageNumber, list(currentLocation),

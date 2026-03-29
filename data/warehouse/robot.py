@@ -74,7 +74,7 @@ class Robot:
         self.batteryDrainMultiplier = 1.0
         # Phase 1 motion model: velocity converges toward desiredVelocity each tick.
         self.desiredVelocity = 0.0
-        self.maxVelocity = 0.6
+        self.maxVelocity = 0.50
         self.accelerationRate = 0.05
         self.decelerationRate = 0.05
         self.minMovingVelocity = 0.10
@@ -91,6 +91,9 @@ class Robot:
         self.pathAge = 0
         self.recentLocations = []
         self.replanCooldownTicks = 0
+        self.stallTicks = 0
+        self.hasCharged = False
+        self.hasCarried = False
         self.decommissioning = False
         self.birthLocation = xyLocation.copy()
 
