@@ -87,7 +87,7 @@ class MainGame:
         self.exit = False
         # User Parameters
         self.warehouse_res = (80,70)
-        self.warehouse_windowBackgroundColour = [30,30,30]
+        self.warehouse_windowBackgroundColour = [20,20,20]
         self.warehouse_windowRes = (320, 280) # upsized resolution (width, height)
         self.sim_frametime  = 1 / 40   # 40 sim ticks/sec
         self.draw_frametime = 1 / 15   # 15 display fps (reduced to save power)
@@ -173,8 +173,8 @@ class MainGame:
         self.warehouse_windowCenter = Functions.get_screencenter(self.warehouse_res)
         self.warehouse_windowArray = Functions.get_screenarray_colour(self.warehouse_res, self.warehouse_windowBackgroundColour)
         self.sub_windowRes = (int(self.warehouse_windowRes[0] * 0.5), int(self.warehouse_windowRes[1] * 0.5))  # 160x140
-        self.panel_h = 165
-        self.chart_h = 95
+        self.panel_h = 255
+        self.chart_h = 145
         self.composite_windowRes = (self.warehouse_windowRes[0] + self.sub_windowRes[0] * 4, self.warehouse_windowRes[1] + self.panel_h + self.chart_h)  # 960x540
         # Rolling history arrays for charts (1800 samples @ 1/sec ≈ 30 min)
         _H = 1800
@@ -713,41 +713,42 @@ class MainGame:
         # to stretch mid-range traffic into the visible part of the colour ramp.
         # COLORMAP_JET: dark-blue (no/low traffic) → cyan → green → yellow → red
         # Zero-traffic cells are forced to black so they read as background.
-        _hm_src = self.warehouse.traffic_ema
-        _hm_max = _hm_src.max()
-        if _hm_max > 0:
-            _hm_visited = _hm_src > 0
-            _hm_pct = float(np.percentile(_hm_src[_hm_visited], 98)) if _hm_visited.any() else _hm_max
-            _hm_clip = max(_hm_pct, _hm_max * 0.05)   # never clip below 5 % of true peak
-            _hm_norm = np.clip((_hm_src / _hm_clip) ** 1.5 * 255, 0, 255).astype(np.uint8)
-        else:
-            _hm_norm = np.zeros_like(_hm_src, dtype=np.uint8)
-        _hm_resized = cv2.resize(_hm_norm, (sw, sh), interpolation=cv2.INTER_NEAREST)
-        _hm_col = cv2.applyColorMap(_hm_resized, cv2.COLORMAP_JET)
-        # Mask unvisited cells back to black (they'd otherwise render as dark blue)
-        _hm_zero_mask = cv2.resize(
-            (_hm_norm == 0).astype(np.uint8), (sw, sh), interpolation=cv2.INTER_NEAREST)
-        _hm_col[_hm_zero_mask > 0] = (0, 0, 0)
-        composite[sh:2*sh, mw+sw*2:mw+sw*3] = _hm_col
+        if self._show_heatmap:
+            _hm_src = self.warehouse.traffic_ema
+            _hm_max = _hm_src.max()
+            if _hm_max > 0:
+                _hm_visited = _hm_src > 0
+                _hm_pct = float(np.percentile(_hm_src[_hm_visited], 98)) if _hm_visited.any() else _hm_max
+                _hm_clip = max(_hm_pct, _hm_max * 0.05)   # never clip below 5 % of true peak
+                _hm_norm = np.clip((_hm_src / _hm_clip) ** 1.5 * 255, 0, 255).astype(np.uint8)
+            else:
+                _hm_norm = np.zeros_like(_hm_src, dtype=np.uint8)
+            _hm_resized = cv2.resize(_hm_norm, (sw, sh), interpolation=cv2.INTER_NEAREST)
+            _hm_col = cv2.applyColorMap(_hm_resized, cv2.COLORMAP_JET)
+            # Mask unvisited cells back to black (they'd otherwise render as dark blue)
+            _hm_zero_mask = cv2.resize(
+                (_hm_norm == 0).astype(np.uint8), (sw, sh), interpolation=cv2.INTER_NEAREST)
+            _hm_col[_hm_zero_mask > 0] = (0, 0, 0)
+            composite[sh:2*sh, mw+sw*2:mw+sw*3] = _hm_col
 
-        # Lifetime traffic overlay — persistent route layer (never decays).
-        # Source: warehouse.traffic_total (objective cumulative visit counts).
-        # Rendered as a warm-white brightness boost so historically-busy corridors
-        # glow even when no robot is currently there, without hiding the JET colours.
-        _slow_src = self.warehouse.traffic_total.astype(np.float32)
-        _slow_max = _slow_src.max()
-        if self._show_heatmap and _slow_max > 0:
-            _slow_visited = _slow_src > 0
-            _slow_pct  = float(np.percentile(_slow_src[_slow_visited], 98)) if _slow_visited.any() else _slow_max
-            _slow_clip = max(_slow_pct, _slow_max * 0.05)
-            _slow_norm = np.clip((_slow_src / _slow_clip) ** 1.5 * 255, 0, 255).astype(np.uint8)
-            _slow_rsz  = cv2.resize(_slow_norm, (sw, sh), interpolation=cv2.INTER_NEAREST)
-            _slow_ov   = cv2.cvtColor(_slow_rsz, cv2.COLOR_GRAY2BGR)
-            _slow_zero = cv2.resize(
-                (_slow_norm == 0).astype(np.uint8), (sw, sh), interpolation=cv2.INTER_NEAREST)
-            _slow_ov[_slow_zero > 0] = (0, 0, 0)
-            composite[sh:2*sh, mw+sw*2:mw+sw*3] = cv2.addWeighted(
-                composite[sh:2*sh, mw+sw*2:mw+sw*3], 1.0, _slow_ov, 0.30, 0)
+            # Lifetime traffic overlay — persistent route layer (never decays).
+            # Source: warehouse.traffic_total (objective cumulative visit counts).
+            # Rendered as a warm-white brightness boost so historically-busy corridors
+            # glow even when no robot is currently there, without hiding the JET colours.
+            _slow_src = self.warehouse.traffic_total.astype(np.float32)
+            _slow_max = _slow_src.max()
+            if _slow_max > 0:
+                _slow_visited = _slow_src > 0
+                _slow_pct  = float(np.percentile(_slow_src[_slow_visited], 98)) if _slow_visited.any() else _slow_max
+                _slow_clip = max(_slow_pct, _slow_max * 0.05)
+                _slow_norm = np.clip((_slow_src / _slow_clip) ** 1.5 * 255, 0, 255).astype(np.uint8)
+                _slow_rsz  = cv2.resize(_slow_norm, (sw, sh), interpolation=cv2.INTER_NEAREST)
+                _slow_ov   = cv2.cvtColor(_slow_rsz, cv2.COLOR_GRAY2BGR)
+                _slow_zero = cv2.resize(
+                    (_slow_norm == 0).astype(np.uint8), (sw, sh), interpolation=cv2.INTER_NEAREST)
+                _slow_ov[_slow_zero > 0] = (0, 0, 0)
+                composite[sh:2*sh, mw+sw*2:mw+sw*3] = cv2.addWeighted(
+                    composite[sh:2*sh, mw+sw*2:mw+sw*3], 1.0, _slow_ov, 0.30, 0)
 
         # Road network overlay — subtle semi-transparent over heatmap.
         # Blended so the heatmap colours remain clearly visible underneath.
@@ -1255,7 +1256,7 @@ class MainGame:
         # (SIM STATS rendering moved to info panel column 3)
 
         # ═══════════════════════ INFO PANEL ═══════════════════════
-        # 960×165px area below the main view (y = mh..mh+ph = 280..445)
+        # 960×255px area below the main view (y = mh..mh+ph)
         # 4 columns of 240px: ROBOTS | CHARGERS | SIM STATS | PACKAGES
         composite[mh, :] = 60  # thin separator line
         font  = cv2.FONT_HERSHEY_SIMPLEX
@@ -1289,7 +1290,7 @@ class MainGame:
         _hdr_y      = mh + 10           # header text baseline
         _underline  = mh + 11           # underline row
         _data_start = mh + 22           # first data row baseline (gap avoids overlap)
-        _split      = 7                 # rows in each section
+        _split      = 11                # rows in each section
         _div_y      = _data_start + _split * lh - lh // 2  # horizontal divider
 
         # Column dividers (no underline — mh separator is enough)
@@ -1822,7 +1823,8 @@ class MainGame:
 
         # Chart 3: Zone capacity fill bars
         self._draw_zone_bars(canvas, w4 * 2, y0, w4 * 3, y1,
-                             zone_rates={"Imp": _r("import"), "Sto": _r("storage"), "Exp": _r("expzone")})
+                             zone_rates={"Imp": _r("import"), "Sto": _r("storage"), "Exp": _r("expzone")},
+                             span_lbl=span_lbl)
 
         # Chart 4: Fleet — Batt% on fixed scale; Working/Charging/Idle share robot-count scale
         mini_chart(w4 * 3, cw, "Fleet Health",
@@ -1834,12 +1836,21 @@ class MainGame:
                    fixed_scales={"Batt%": (0, 100)},
                    rates={"Batt%": _r("batt"), "Working": _r("working"), "Chging": _r("chging"), "Idle": _r("idle")})
 
-    def _draw_zone_bars(self, canvas, x0, y0, x1, y1, zone_rates=None):
+    def _draw_zone_bars(self, canvas, x0, y0, x1, y1, zone_rates=None, span_lbl=""):
         """Render zone capacity fill-bars into canvas[y0:y1, x0:x1]."""
         font  = cv2.FONT_HERSHEY_SIMPLEX
         w, h  = x1 - x0, y1 - y0
         arr   = np.full((h, w, 3), (8, 8, 8), dtype=np.uint8)
-        cv2.putText(arr, "Zone Capacity", (4, 11), font, 0.32, (145, 145, 145), 1)
+        # Title — match mini_chart style: backdrop + same font/colour
+        _title_str = "Zone Capacity ({})".format(span_lbl) if span_lbl else "Zone Capacity"
+        (tw, th), baseline = cv2.getTextSize(_title_str, font, 0.30, 1)
+        bx0b = max(2, 2)
+        by0b = max(1, 11 - th - 1)
+        bx1b = min(w - 1, 4 + tw + 2)
+        by1b = min(h - 1, 11 + baseline + 1)
+        roi = arr[by0b:by1b, bx0b:bx1b]
+        roi[:] = (roi.astype(np.int16) * 3 // 10).clip(0, 255).astype(np.uint8)
+        cv2.putText(arr, _title_str, (4, 11), font, 0.30, (185, 185, 185), 1)
         wh = self.warehouse
         zones = [
             ("Imp",     wh.packagesInImportCount,  wh.numberOfImportSlots,  (200, 130,  60)),
@@ -1878,6 +1889,72 @@ class MainGame:
                 (rtw, _), _ = cv2.getTextSize(rate_str, font, 0.25, 1)
                 cv2.putText(arr, rate_str, (w - 3 - rtw, by + bar_h // 2 + 10),
                             font, 0.25, (75, 75, 75), 1)
+
+        # ── Summary section below the bars ──
+        _sum_y = 15 + 3 * bar_slot + 2           # 2px gap below last bar
+
+        # Total warehouse utilization bar
+        _tot_used  = wh.packagesInWarehouseCount
+        _tot_slots = wh.packagesMaxQuantity
+        _tot_frac  = min(_tot_used / max(_tot_slots, 1), 1.0)
+        _tot_bar_h = 10
+        cv2.putText(arr, "Tot", (2, _sum_y + _tot_bar_h - 3), font, 0.28, (160, 160, 160), 1)
+        cv2.rectangle(arr, (lbl_w, _sum_y), (lbl_w + bar_max_w, _sum_y + _tot_bar_h), (25, 25, 25), -1)
+        if _tot_frac < 0.6:    _tfc = (80, 190, 80)
+        elif _tot_frac < 0.85: _tfc = (50, 200, 200)
+        else:                   _tfc = (80, 80, 200)
+        _tot_fill = int(_tot_frac * bar_max_w)
+        if _tot_fill > 0:
+            cv2.rectangle(arr, (lbl_w, _sum_y), (lbl_w + _tot_fill, _sum_y + _tot_bar_h), _tfc, -1)
+        _tot_txt = "{:.0f}%".format(_tot_frac * 100)
+        (_ttw, _), _ = cv2.getTextSize(_tot_txt, font, 0.28, 1)
+        cv2.putText(arr, _tot_txt, (lbl_w + bar_max_w // 2 - _ttw // 2, _sum_y + _tot_bar_h - 3),
+                    font, 0.28, (200, 200, 200), 1)
+        _tot_cnt = "{}/{}".format(_tot_used, _tot_slots)
+        (_tcw, _), _ = cv2.getTextSize(_tot_cnt, font, 0.25, 1)
+        cv2.putText(arr, _tot_cnt, (w - 3 - _tcw, _sum_y + _tot_bar_h // 2 + 2),
+                    font, 0.25, (100, 100, 100), 1)
+
+        # Per-zone robot counts + zone cell sizes
+        _info_y = _sum_y + _tot_bar_h + 12
+        _zone_ids  = [1, 2, 3]
+        _zone_abbr = {1: "Imp", 2: "Sto", 3: "Exp"}
+        _zone_cols = {1: (200, 130, 60), 2: (80, 180, 200), 3: (80, 120, 220)}
+        # Count robots per zone
+        _robots_in_zone = {1: 0, 2: 0, 3: 0}
+        for rb in wh.robots:
+            if rb.area == 'import':    _robots_in_zone[1] += 1
+            elif rb.area == 'storage': _robots_in_zone[2] += 1
+            elif rb.area == 'export':  _robots_in_zone[3] += 1
+        # Zone cell counts
+        _zone_cells = {1: wh.numberOfImportSlots, 2: wh.numberOfStorageSlots, 3: wh.numberOfExportSlots}
+        _total_zone_cells = sum(_zone_cells.values())
+        # Road cells per zone
+        _road = wh.road_map
+        _has_roads = _road is not None and _road.any()
+        # Render: "Imp  R:3  420c 20%  | Sto  R:5  900c 45%  | ..."
+        _col_span = w // 3
+        for _zi, _zid in enumerate(_zone_ids):
+            _zx = _zi * _col_span + 2
+            _zabbr = _zone_abbr[_zid]
+            _zcol  = _zone_cols[_zid]
+            _rcount = _robots_in_zone[_zid]
+            _cells  = _zone_cells[_zid]
+            _cell_pct = int(_cells / max(_total_zone_cells, 1) * 100)
+            # Line 1: zone abbr + robot count
+            _l1 = "{} R:{}".format(_zabbr, _rcount)
+            cv2.putText(arr, _l1, (_zx, _info_y), font, 0.25, _zcol, 1)
+            # Line 2: cells + zone share %
+            _l2 = "{}c {}%".format(_cells, _cell_pct)
+            cv2.putText(arr, _l2, (_zx, _info_y + 10), font, 0.22, (90, 90, 90), 1)
+
+        # Road coverage line
+        if _has_roads:
+            _road_cells = int(np.count_nonzero(_road))
+            _grid_total = wh.zoneMap.shape[0] * wh.zoneMap.shape[1]
+            _road_pct = int(_road_cells / max(_grid_total, 1) * 100)
+            _road_line = "Roads: {} cells ({}%)".format(_road_cells, _road_pct)
+            cv2.putText(arr, _road_line, (2, _info_y + 22), font, 0.22, (75, 75, 75), 1)
         canvas[y0:y1, x0:x1] = arr
 
     def gameEnd(self):

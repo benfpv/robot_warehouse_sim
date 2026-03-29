@@ -12,25 +12,27 @@ import cv2
 import heapq
 
 # ── Tuning ──────────────────────────────────────────────────────────────
-_MIN_TOTAL_VISITS    = 150      # gate: suppress until enough traffic exists
+_MIN_TOTAL_VISITS    = 300      # gate: suppress until substantial traffic exists
 _BLUR_SIGMA          = 1.5      # hotspot detection blur
-_NMS_RADIUS          = 5        # non-max suppression spacing (cells) — wider = fewer hotspots
-_MIN_HOTSPOT_PCT     = 30       # hotspot floor percentile — higher = fewer weak nodes
-_MAX_HOTSPOTS        = 14       # cap — fewer = cleaner network
-_KNN_K               = 2        # shortcut edges — down from 3
-_COST_BLUR_SIGMA     = 2.0      # smooth cost grid — wider = less weaving
-_TRAFFIC_WEIGHT      = 3.5      # how strongly paths prefer traffic corridors
-_ZONE_COST_PENALTY   = 1.5      # cost multiplier inside zone interiors (roads can carve through)
+_NMS_RADIUS          = 6        # non-max suppression spacing (cells) — wider = fewer hotspots
+_MIN_HOTSPOT_PCT     = 40       # hotspot floor percentile — higher = fewer weak nodes
+_MAX_HOTSPOTS        = 10       # cap — fewer = cleaner network
+_KNN_K               = 1        # shortcut edges — minimal redundancy beyond MST
+_COST_BLUR_SIGMA     = 2.5      # smooth cost grid — wider = less weaving
+_TRAFFIC_WEIGHT      = 4.0      # how strongly paths prefer traffic corridors
+_ZONE_COST_PENALTY   = 1.8      # cost multiplier inside zone interiors
 _CHARGER_COST        = 1e6      # effectively impassable
-_EMA_BLEND           = 0.30     # weight of recent EMA vs lifetime traffic
+_EMA_BLEND           = 0.35     # weight of recent EMA vs lifetime traffic
 _REINFORCE_STRENGTH  = 3.0      # tube-thickening multiplier
 _FLOW_MOMENTUM       = 0.70     # how much of old flow accumulator to keep
-_BRANCH_PCT          = 40       # flow percentile → branch  (tier 1) — raised = fewer branches
-_COLLECTOR_PCT       = 65       # flow percentile → collector (tier 2) — up from 50
-_ARTERY_PCT          = 88       # flow percentile → arterial  (tier 3) — up from 80
+_BRANCH_PCT          = 50       # flow percentile → branch  (tier 1) — only strong routes
+_COLLECTOR_PCT       = 70       # flow percentile → collector (tier 2)
+_ARTERY_PCT          = 90       # flow percentile → arterial  (tier 3)
 _PATHS_PER_STEP      = 3        # A* paths computed per step() call
-_TURN_PENALTY        = 0.5      # A* surcharge for changing direction
-_RDP_EPSILON         = 1.5      # Ramer-Douglas-Peucker simplification tolerance
+_TURN_PENALTY        = 1.8      # A* surcharge for changing direction (strong → straighter)
+_RDP_EPSILON         = 2.5      # Ramer-Douglas-Peucker simplification tolerance (aggressive smoothing)
+_MIN_PATH_LEN        = 5        # discard paths shorter than this (trivial connections)
+_COLD_FILTER_PCT     = 60       # percentile below which traffic is zeroed out
 
 # Plaza detection
 _PLAZA_FLOW_PCT      = 75       # flow percentile threshold (much higher than road tiers)
@@ -135,6 +137,8 @@ class RoadBuildJob:
                                (hs[i][0], hs[i][1]), (hs[j][0], hs[j][1]))
             if path:
                 path = _simplify_path(path)
+                if len(path) < _MIN_PATH_LEN:
+                    continue  # skip trivial short connections
                 w = (hs[i][2] + hs[j][2]) * 0.5
                 for px, py in path:
                     self._fresh_flow[py, px] += w
@@ -158,6 +162,8 @@ class RoadBuildJob:
                                (hs[i][0], hs[i][1]), (hs[j][0], hs[j][1]))
             if path:
                 path = _simplify_path(path)
+                if len(path) < _MIN_PATH_LEN:
+                    continue  # skip trivial short connections
                 w = (hs[i][2] + hs[j][2]) * 0.5
                 for px, py in path:
                     self._fresh_flow[py, px] += w * 1.5
@@ -191,6 +197,12 @@ class RoadBuildJob:
 
             _prune_dead_ends(lm)
 
+            # ── Widen all roads to minimum 2 cells thick ───────────
+            _widen_roads(lm, self._charger_grid)
+
+            # Re-prune after widening (dilation can create new stubs)
+            _prune_dead_ends(lm)
+
             # Stamp plazas (traffic areas + charger clusters)
             _stamp_plazas(lm, self._flow_accum, self._charger_grid, self._plaza_map)
 
@@ -219,10 +231,10 @@ def _blend_traffic(traffic_total, traffic_ema):
         e_max = max(ema_f.max(), 1.0)
         blended = (1.0 - _EMA_BLEND) * blended + _EMA_BLEND * (ema_f / e_max)
 
-    # Discard the coldest half — only warm/hot cells contribute to roads
+    # Discard the coldest traffic — only warm/hot cells contribute to roads
     nonzero = blended[blended > 0]
     if len(nonzero) > 0:
-        median = float(np.percentile(nonzero, 50))
+        median = float(np.percentile(nonzero, _COLD_FILTER_PCT))
         blended[blended < median] = 0.0
 
     return blended
@@ -389,8 +401,9 @@ def _astar_8dir(cost_grid, H, W, start, goal):
             cell_cost = cost_grid[ny, nx]
             move_cost = base_cost * cell_cost
             # Penalise direction changes → straighter paths
+            # Use flat penalty so it's equally effective on low-cost (traffic) cells
             if prev_dx is not None and (dx != prev_dx or dy != prev_dy):
-                move_cost += _TURN_PENALTY * cell_cost
+                move_cost += _TURN_PENALTY
             new_g = g_score[cy, cx] + move_cost
             if new_g < g_score[ny, nx]:
                 g_score[ny, nx] = new_g
@@ -516,17 +529,77 @@ def _stamp_plazas(lane_map, flow_accum, charger_grid, plaza_map):
         plaza[cg > 0] = 0
         plaza_map[plaza > 0] = 1
 
+# ── Road widening (minimum 2-cell width) ───────────────────────────────
+
+def _widen_roads(lane_map, charger_grid):
+    """Expand thin (1-cell wide) road segments to minimum 2 cells wide.
+
+    Only targets genuinely thin sections — roads already 2+ cells wide
+    are untouched.  Each thin pixel gets exactly one new neighbour added
+    in the perpendicular direction, so the result is exactly 2-wide.
+    Charger cells and grid edges are never overwritten.
+    """
+    H, W = lane_map.shape
+    road = lane_map > 0
+
+    cg = None
+    if charger_grid is not None:
+        cg = np.asarray(charger_grid)
+        if cg.shape != (H, W):
+            cg = None
+
+    additions = []  # (y, x, tier)
+
+    for y in range(1, H - 1):
+        for x in range(1, W - 1):
+            if not road[y, x]:
+                continue
+            tier = int(lane_map[y, x])
+
+            # Thin = both cardinal neighbours on an axis are non-road
+            thin_h = not road[y, x - 1] and not road[y, x + 1]
+            thin_v = not road[y - 1, x] and not road[y + 1, x]
+
+            if not thin_h and not thin_v:
+                continue  # already 2+ wide in both axes
+
+            # Pick first valid empty neighbour on a thin axis
+            candidates = []
+            if thin_h:
+                candidates.extend([(y, x + 1), (y, x - 1)])
+            if thin_v:
+                candidates.extend([(y + 1, x), (y - 1, x)])
+
+            for ny, nx in candidates:
+                if ny <= 0 or ny >= H - 1 or nx <= 0 or nx >= W - 1:
+                    continue
+                if road[ny, nx]:
+                    continue  # already road
+                if cg is not None and cg[ny, nx]:
+                    continue  # charger
+                additions.append((ny, nx, tier))
+                break
+
+    for ay, ax, atier in additions:
+        if lane_map[ay, ax] < atier:
+            lane_map[ay, ax] = atier
+
 
 # ── Dead-end pruning ───────────────────────────────────────────────────
 
 def _prune_dead_ends(lane_map):
-    """Remove leaf pixels that have only 0-1 road neighbours (dead stubs)."""
+    """Remove leaf pixels that have only 0-1 road neighbours (dead stubs).
+
+    Runs multiple passes until stable — widening can create cascading stubs.
+    """
     H, W = lane_map.shape
-    road = (lane_map > 0).astype(np.uint8)
-    # Count 8-connected road neighbours per cell (exclude self)
     kernel = np.ones((3, 3), dtype=np.uint8)
     kernel[1, 1] = 0
-    nbr_count = cv2.filter2D(road, cv2.CV_16U, kernel)
-    # Prune: road cell with ≤1 neighbour and NOT arterial (value 3)
-    prune_mask = (lane_map > 0) & (lane_map < 3) & (nbr_count <= 1)
-    lane_map[prune_mask] = 0
+    for _ in range(4):  # up to 4 passes for cascading stubs
+        road = (lane_map > 0).astype(np.uint8)
+        nbr_count = cv2.filter2D(road, cv2.CV_16U, kernel)
+        # Prune: road cell with ≤1 neighbour and NOT arterial (value 3)
+        prune_mask = (lane_map > 0) & (lane_map < 3) & (nbr_count <= 1)
+        if not prune_mask.any():
+            break
+        lane_map[prune_mask] = 0

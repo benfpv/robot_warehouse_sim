@@ -738,6 +738,7 @@ class Warehouse:
     def invalidate_stale_targets(self):
         """Cancel in-flight moves whose target cells no longer match the intended zone."""
         expected_zone = {'import': ZONE_IMPORT, 'storage': ZONE_STORAGE, 'export': ZONE_EXPORT}
+        PICKUP_ACTIONS  = {"move to target pickup location", "pick up target package"}
         DROPOFF_ACTIONS = {"move to target dropoff location", "drop off target package"}
         for p in self.packages:
             if p.status in ('move planned', 'carried') and p.areaTarget != 'none':
@@ -749,6 +750,24 @@ class Warehouse:
                     p.xyLocationTarget = p.xyLocation.copy()
                     if p.status == 'move planned':
                         p.status = 'idle'
+                        # Strip inbound robot pickup tasks + clean lists
+                        if p.packageNumber in self.packagesMovingList:
+                            self.packagesMovingList.remove(p.packageNumber)
+                        px, py = p.xyLocation
+                        for r in self.robots:
+                            if any(t[0] == [px, py] and t[1] in PICKUP_ACTIONS
+                                   for t in r.actionQueue):
+                                new_q = [t for t in r.actionQueue
+                                         if not (t[0] == [px, py] and t[1] in PICKUP_ACTIONS)]
+                                removed = len(r.actionQueue) - len(new_q)
+                                if removed:
+                                    r.actionQueue = new_q
+                                    tai = next((j for j, x in enumerate(self.robotsTaskAssignmentList)
+                                                if x[0] == r.robotNumber), None)
+                                    if tai is not None:
+                                        self.robotsTaskAssignmentList[tai][1] = max(
+                                            0, self.robotsTaskAssignmentList[tai][1] - removed)
+                                    r.status = r.actionQueue[0][1] if r.actionQueue else 'idle'
                     elif p.status == 'carried':
                         # Abort carry — mirrors reconcile_zone_changes Case C
                         p.status = 'idle'
@@ -2078,6 +2097,8 @@ class Warehouse:
                 _grid_h,
                 self.chargersInWarehouse,
                 _other_robots,
+                road_map=self.road_map if self.road_map is not None else None,
+                traffic_ema=self.traffic_ema,
             )
         robot.path = _path
         robot.pathTarget = _goal
@@ -2792,47 +2813,24 @@ class Warehouse:
         return -1
 
     def package_dropoff(self, packageNumber):
-        try:
-            # Update Move & MovingLists
-            packageMoveListIndex = self.packagesMoveList.index(packageNumber)
-            packageMovingListIndex = self.packagesMovingList.index(packageNumber)
-            self.packagesMoveList.pop(packageMoveListIndex)
-            self.packagesMovingList.pop(packageMovingListIndex)
-            # Update Planned Counts
-            packageIndex = [i for i, x in enumerate(self.packages) if x.packageNumber == packageNumber][0]
-            if self.packages[packageIndex].areaTarget == "import":
-                self.packagesPlannedInImportCount -= 1
-            elif self.packages[packageIndex].areaTarget == "storage":
-                self.packagesPlannedInStorageCount -= 1
-            elif self.packages[packageIndex].areaTarget == "export":
-                self.packagesPlannedInExportCount -= 1
-            # Update Package
-            self.packages[packageIndex].status = "idle"
-            self.packages[packageIndex].areaTarget = "none"
-            self.packages[packageIndex].carrier = -1
-            self.packages[packageIndex].deliveredAt = time.time()
-        except (ValueError, IndexError):
-            print("- packageNumber #{} does not exist in move/moving lists!".format(packageNumber))
-            print("- packagesMoveList: {}".format(self.packagesMoveList))
-            print("- packagesMovingList: {}".format(self.packagesMovingList))
-            print("- lenPackages: {}".format(len(self.packages)))
-            print("- packageNumber: {}".format(packageNumber))
-            # Update Planned Counts
-            packageIndex = [i for i, x in enumerate(self.packages) if x.packageNumber == packageNumber][0]
-            if self.packages[packageIndex].areaTarget == "import":
-                self.packagesPlannedInImportCount -= 1
-            elif self.packages[packageIndex].areaTarget == "storage":
-                self.packagesPlannedInStorageCount -= 1
-            elif self.packages[packageIndex].areaTarget == "export":
-                self.packagesPlannedInExportCount -= 1
-            # Update Package
-            packageLocation = self.packages[packageIndex].xyLocation
-            packageStatus = self.packages[packageIndex].status
-            print("- packageIndex: {}, xyLocation: {}, status: {}".format(packageIndex, packageLocation, packageStatus))
-            self.packages[packageIndex].status = "error"
-            self.packages[packageIndex].areaTarget = "none"
-            self.packages[packageIndex].carrier = -1
-            self.packages[packageIndex].deliveredAt = time.time()
+        # Tolerant list cleanup: remove from whichever lists contain the package
+        if packageNumber in self.packagesMoveList:
+            self.packagesMoveList.remove(packageNumber)
+        if packageNumber in self.packagesMovingList:
+            self.packagesMovingList.remove(packageNumber)
+        # Update Planned Counts
+        packageIndex = [i for i, x in enumerate(self.packages) if x.packageNumber == packageNumber][0]
+        if self.packages[packageIndex].areaTarget == "import":
+            self.packagesPlannedInImportCount -= 1
+        elif self.packages[packageIndex].areaTarget == "storage":
+            self.packagesPlannedInStorageCount -= 1
+        elif self.packages[packageIndex].areaTarget == "export":
+            self.packagesPlannedInExportCount -= 1
+        # Update Package
+        self.packages[packageIndex].status = "idle"
+        self.packages[packageIndex].areaTarget = "none"
+        self.packages[packageIndex].carrier = -1
+        self.packages[packageIndex].deliveredAt = time.time()
         return self.packagesMoveList, self.packagesMovingList, self.packages, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount
 
     def robot_insert_task(self, robotIndex, robotNewActionIndex, robotNewLocation, robotNewAction):
