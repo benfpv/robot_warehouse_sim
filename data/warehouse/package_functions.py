@@ -89,12 +89,10 @@ class Package_Functions:
 
     @staticmethod
     def generate_package(xyLocation, itemsList, addressesList, packageRollingCount, area='import'):
-        """Construct a new Package with randomised item, addresses, and deadline."""
+        """Construct a new Package with randomised item, addresses, and deadline (10–90 s)."""
         itemName = random.sample(sorted(itemsList), 1)[0]
         packageLog = []
-        #print('- itemName: ' + str(itemName))
         itemValues = itemsList[itemName]
-        #print('- itemValues: ' + str(itemValues))
         addressFrom = random.sample(sorted(addressesList), 1)[0]
         addressTo = random.sample(sorted(addressesList), 1)[0]
         while addressTo == addressFrom:
@@ -106,11 +104,7 @@ class Package_Functions:
         # timeToDeadline is recomputed from deadline each sim tick;
         # initialise to the full span so the Package constructor has a valid value.
         timeToDeadline = deadline - todaysDate
-        #g = random.randint(1,254)
-        #r = random.randint(1,254)
-        #b = random.randint(1,254)
-        #colour = [b, g, r]
-        colour = [160, 140, 110]
+        colour = [160, 140, 110]  # slate-blue default; overwritten by deadline-based colouring
         areaTarget = "none"
         xyLocationTarget = xyLocation.copy()
         status = "idle"

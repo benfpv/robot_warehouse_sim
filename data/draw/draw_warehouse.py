@@ -12,14 +12,6 @@ class Draw_Warehouse:
             mask = zoneMap == zoneId
             mainWindow[mask] = colour
         return mainWindow
-    
-    @staticmethod
-    def draw_warehouseLanes(mainWindow, zoneMap, colourOfLanes):
-        for zoneId in [1, 2, 3]:
-            mask = (zoneMap == zoneId).astype(np.uint8)
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            cv2.drawContours(mainWindow, contours, -1, colourOfLanes, 1)
-        return mainWindow
 
     @staticmethod
     def draw_zoneMap_display(zoneMap, zoneColours, bgColour=(20, 20, 20)):

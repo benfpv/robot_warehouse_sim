@@ -10,7 +10,6 @@ class Robot_Functions:
     def import_robot(self, robotSpawnLocationsAvailableMap, robotsRollingCount, robotsInWarehouseCount, robotsMaxQuantity, robotsInWarehouse, robots, robotsTaskAssignmentList, chargersInWarehouse):
         """Attempt to spawn one new robot on the outer perimeter if capacity allows."""
         if robotsRollingCount < robotsMaxQuantity:
-            #print('- Robot_Functions.import_robot()')
             # Search for adequate spawn area
             xyLocation = self.try_robotTargetLocation(robotSpawnLocationsAvailableMap, robotsInWarehouse, chargersInWarehouse)
             # Generate robot
@@ -20,7 +19,6 @@ class Robot_Functions:
                 robotsTaskAssignmentList.append([robotsRollingCount, 0])
                 robotsRollingCount += 1
                 robotsInWarehouseCount += 1
-                #print('- Len robots: {}'.format(len(self.robots)))
         return robotsRollingCount, robotsInWarehouseCount, robots, robotsTaskAssignmentList
 
     @staticmethod
@@ -47,7 +45,7 @@ class Robot_Functions:
 
     @staticmethod
     def generate_robot(xyLocationSpawn, robotsRollingCount):
-        #print('- generate_robot')
+        """Construct a new Robot with randomised battery and default motion model."""
         robotNumber = robotsRollingCount
         robotLog = []
         timerCheckBattery = time.time()
@@ -65,7 +63,7 @@ class Robot_Functions:
         direction = 0
         cardinal = ''
         velocity = 0
-        status = 'idle' # idle, moving to package, moving package to target,
+        status = 'idle'
         carrying = -1
         carrier = -1
         robot = Robot(robotNumber, robotLog, timerCheckBattery, batteryPercent, batteryChargingRate, batteryDepletingRate, actionQueue, colour, area, xyLocation, areaTarget, xyLocationTarget, xyLocationDiff, direction, cardinal, velocity, status, carrying, carrier)

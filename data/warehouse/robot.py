@@ -30,7 +30,7 @@ class Robot:
 
     Motion model:
         desiredVelocity:     Target speed for this tick (set by speed profile).
-        maxVelocity:         Absolute speed cap (0.6 cells/tick).
+        maxVelocity:         Absolute speed cap (0.50 cells/tick).
         accelerationRate:    Speed increase per tick (0.05).
         decelerationRate:    Speed decrease per tick (0.05).
         minMovingVelocity:   Below this the robot snaps to zero (0.10).

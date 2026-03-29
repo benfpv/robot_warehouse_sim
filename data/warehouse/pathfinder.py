@@ -4,8 +4,14 @@ import numpy as np
 
 
 class AStarPathfinder:
-    """Grid-based A* with 8-direction movement, road preference, and traffic awareness."""
+    """Grid-based A* with 8-direction movement, road preference, and traffic awareness.
 
+    Road preference steers robots toward higher-tier roads (arterial > collector > branch).
+    Traffic congestion adds soft cost on heavily-used cells.  Occupied cells (other robots)
+    incur a high soft cost to encourage routing around them without hard-blocking.
+    """
+
+    # 8-direction neighbourhood: (dx, dy, base_step_cost)
     _NEIGHBORS = (
         (1, 0, 1.0),
         (1, 1, math.sqrt(2.0)),
@@ -20,32 +26,32 @@ class AStarPathfinder:
     # Road preference: multiplier on step_cost for each road tier.
     # Lower = cheaper = preferred.  Off-road cells (tier 0) pay a penalty.
     _ROAD_COST = {
-        0: 1.6,    # no road: 60% surcharge (discourages off-road)
-        1: 1.1,    # branch: slight discount
-        2: 0.7,    # collector: fast
-        3: 0.6,    # arterial: fastest — strong magnet
+        0: 1.6,    # no road: 60% surcharge (discourages off-road travel)
+        1: 1.1,    # branch: slight discount over off-road
+        2: 0.7,    # collector: meaningful discount (fast corridor)
+        3: 0.6,    # arterial: strongest magnet (main highway)
     }
-    # Traffic congestion: per-robot cost added when a cell is occupied.
+    # Traffic congestion: per-robot soft cost when a cell is occupied by another robot.
     _TRAFFIC_OCCUPANCY_COST = 4.0
 
     @staticmethod
     def _heuristic(a, b):
-        # Octile distance for 8-direction grids.
+        """Octile distance scaled by 0.6 to stay admissible with road discounts."""
         dx = abs(a[0] - b[0])
         dy = abs(a[1] - b[1])
         dmin = min(dx, dy)
         dmax = max(dx, dy)
-        # Use 0.6 multiplier so heuristic stays admissible even with road discounts
         return (dmax + (math.sqrt(2.0) - 1.0) * dmin) * 0.6
 
     @staticmethod
     def _turn_penalty(prev_dir, new_dir):
+        """Small cost for direction changes to produce smoother paths."""
         if prev_dir is None or prev_dir == new_dir:
             return 0.0
         dot = prev_dir[0] * new_dir[0] + prev_dir[1] * new_dir[1]
         if dot >= 0:
-            return 0.1
-        return 0.25
+            return 0.1   # gentle turn: minor cost
+        return 0.25       # sharp reversal: higher cost
 
     def find_path(self, start, goal, grid_w, grid_h, chargers_grid, occupied_cells,
                   road_map=None, traffic_ema=None):

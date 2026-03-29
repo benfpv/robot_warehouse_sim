@@ -1,6 +1,6 @@
 """Robot Warehouse Simulator — entry point and composite dashboard.
 
-Runs the simulation loop at 40 Hz and renders a 960×540 composite OpenCV
+Runs the simulation loop at 40 Hz and renders a 960×680 composite OpenCV
 window with 8 sub-views, a 4-column info panel, and a 4-chart strip.
 All display, mouse, and keyboard interaction is handled here.
 """
@@ -175,7 +175,7 @@ class MainGame:
         self.sub_windowRes = (int(self.warehouse_windowRes[0] * 0.5), int(self.warehouse_windowRes[1] * 0.5))  # 160x140
         self.panel_h = 255
         self.chart_h = 145
-        self.composite_windowRes = (self.warehouse_windowRes[0] + self.sub_windowRes[0] * 4, self.warehouse_windowRes[1] + self.panel_h + self.chart_h)  # 960x540
+        self.composite_windowRes = (self.warehouse_windowRes[0] + self.sub_windowRes[0] * 4, self.warehouse_windowRes[1] + self.panel_h + self.chart_h)  # 960x680
         # Rolling history arrays for charts (1800 samples @ 1/sec ≈ 30 min)
         _H = 1800
         self._hist_imported = np.zeros(_H, dtype=np.float32)
@@ -513,7 +513,6 @@ class MainGame:
         timeLoopStart = time.time()
 
         self.timeElapsed = int(time.time() - self.timeStart)
-        #print('--- New loop --- #{}, timeElapsed: {}'.format(loop_count, self.timeElapsed))
 
         if self.timeElapsed > 24000:
             self.gameEnd()
@@ -533,17 +532,13 @@ class MainGame:
 
         if (frameTime < self.sim_frametime):
             time.sleep(self.sim_frametime - frameTime)
-        
-        if loop_count % 1 == 0:
-            pass
-            #print('- L#{}, t: {}, pIn: {}, pToMove: {}, rIn: {}, pMoving: {}, avg_frameTime: {}'.format(loop_count, self.timeElapsed, self.warehouse.packagesInWarehouseCount, len(self.warehouse.packagesMoveList), self.warehouse.robotsInWarehouseCount, len(self.warehouse.packagesMovingList), frameTime))
 
         return self, frameTime
 
     def gameDraw(self):
         """Build and display the composite dashboard window.
 
-        Layout (960×540 px):
+        Layout (960×680 px):
           Row 0: Main view (320×280) | Chargers | Packages | Zone Map | Deadlines+Fleet Batt
           Row 1: (main view cont.)   | Robots   | Pkg Tgts | Heatmap  | Flow Ctrl
           Info panel: ROBOTS | CHARGERS | SIM STATS | PACKAGES (4×240 px)
@@ -568,6 +563,29 @@ class MainGame:
 
         # Main view (left column)
         composite[0:mh, 0:mw] = cv2.resize(self.warehouseWindow, (mw, mh), interpolation=cv2.INTER_NEAREST)
+
+        # Subtle road/plaza overlay on the main view
+        _mv = composite[0:mh, 0:mw]
+        _rd = self.warehouse.road_map
+        if self._show_roads and _rd is not None and _rd.any():
+            _rd_rsz = cv2.resize(_rd, (mw, mh), interpolation=cv2.INTER_NEAREST)
+            _rd_alpha = np.zeros((mh, mw), dtype=np.float32)
+            _rd_alpha[_rd_rsz == 1] = 0.06    # branches: barely visible
+            _rd_alpha[_rd_rsz == 2] = 0.10    # collectors: faint
+            _rd_alpha[_rd_rsz >= 3] = 0.14    # arterials: subtle
+            _a3 = _rd_alpha[:, :, np.newaxis]
+            _tint = np.float32([200, 200, 200])  # near-white tint (BGR)
+            _mv[:] = np.clip(
+                _mv.astype(np.float32) * (1.0 - _a3) + _tint * _a3,
+                0, 255).astype(np.uint8)
+        _pz = self.warehouse.plaza_map
+        if self._show_plazas and _pz is not None and _pz.any():
+            _pz_rsz = cv2.resize(_pz, (mw, mh), interpolation=cv2.INTER_NEAREST)
+            _pz_mask = _pz_rsz > 0
+            _pz_tint = np.float32([140, 120, 60])  # warm amber (BGR)
+            _mv[_pz_mask] = np.clip(
+                _mv[_pz_mask].astype(np.float32) * 0.92 + _pz_tint * 0.08,
+                0, 255).astype(np.uint8)
 
         # Robot overlay: filled circle on the main view.
         _scale_x = mw / max(self.warehouse_res[0], 1)

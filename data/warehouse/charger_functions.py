@@ -1,7 +1,10 @@
+import logging
 import random
 import time
 
 from data.warehouse.charger import *
+
+_log = logging.getLogger(__name__)
 
 
 class Charger_Functions:
@@ -17,6 +20,9 @@ class Charger_Functions:
                 charger = self.generate_charger(xyLocation, chargersRollingCount)
                 chargers.append(charger)
                 chargersRollingCount += 1
+            else:
+                _log.warning('charger #%d spawn failed: no free cell after 3 attempts (%d/%d placed)',
+                             chargersRollingCount, len(chargers), chargersMaxQuantity)
         return chargersRollingCount, chargers
     
     @staticmethod
@@ -42,12 +48,12 @@ class Charger_Functions:
     
     @staticmethod
     def generate_charger(xyLocationSpawn, chargersRollingCount):
-        #print('- generate_robot')
+        """Construct a new Charger at the given location."""
         chargerNumber = chargersRollingCount
         colour = (50, 190, 230)
         area = 'neutral'
         xyLocation = xyLocationSpawn
-        status = 'idle' # idle, charging
+        status = 'idle'
         charger = Charger(chargerNumber, colour, area, xyLocation, status)
         return charger
     

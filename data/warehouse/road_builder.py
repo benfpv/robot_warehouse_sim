@@ -1,4 +1,4 @@
-"""Physarum-inspired organic road builder  v4 — frame-distributed.
+"""Physarum-inspired organic road builder — frame-distributed.
 
 Heavy A* work is spread across simulation frames via a step-able job object.
 Each call to ``job.step()`` routes 2-3 pairs, so the sim never blocks for
@@ -35,13 +35,13 @@ _MIN_PATH_LEN        = 5        # discard paths shorter than this (trivial conne
 _COLD_FILTER_PCT     = 60       # percentile below which traffic is zeroed out
 
 # Plaza detection
-_PLAZA_FLOW_PCT      = 75       # flow percentile threshold (much higher than road tiers)
-_MIN_PLAZA_CELLS     = 16       # minimum connected hot cells to form a plaza
-_PLAZA_FILL_RATIO    = 0.45     # min fill ratio (hot / bounding-box area)
-_PLAZA_MAX_ASPECT    = 2.5      # skip elongated components (thin lines)
-_CHARGER_CLUSTER_R   = 2        # dilation radius for charger clustering
+_PLAZA_FLOW_PCT      = 75       # flow percentile threshold — higher = fewer/smaller plazas
+_MIN_PLAZA_CELLS     = 16       # minimum connected hot cells to qualify as a plaza
+_PLAZA_FILL_RATIO    = 0.45     # min fill ratio (hot cells / bounding-box area)
+_PLAZA_MAX_ASPECT    = 2.5      # reject elongated components (thin lines aren't plazas)
+_CHARGER_CLUSTER_R   = 2        # dilation radius for finding charger clusters
 _CHARGER_PLAZA_PAD   = 1        # padding around charger cluster bounding box
-_CHARGER_PLAZA_MIN_T = 0.25     # min fraction of plaza cells with traffic
+_CHARGER_PLAZA_MIN_T = 0.25     # min fraction of plaza cells that must have traffic
 
 # 8-direction movement: (dx, dy, base_step_cost)
 _DIRS_8 = [

@@ -62,7 +62,8 @@ class Warehouse:
     Key subsystems:
         Flow control  — robot-scaled adaptive import cap (pipeline_depth × n_robots)
         Power policy  — adaptive charge threshold with pressure/eco damping
-        Pathfinding   — dense A* with soft robot-occupancy costs and speed profiling
+        Pathfinding   — dense A* with road preference, traffic congestion, and speed profiling
+        Road network  — Physarum-inspired organic builder (hotspots → MST → tiered roads → plazas)
         Decommission  — graceful robot retirement with perimeter exit
     """
     _POWER_POLICY_MODES = ('eco', 'balanced', 'performance')
@@ -602,7 +603,6 @@ class Warehouse:
         pathfind/move/battery/idle-park/decommission), occupancy arrays,
         and periodic summary logging.
         """
-        #self.printDebugInfo()
         self.datetimeNow = datetime.now() # Update datetime
         self.timeElapsed = time.time() - self.timeStart
         self._update_traffic_heatmap()
@@ -623,7 +623,6 @@ class Warehouse:
         self.importSpaceAvailable, self.storageSpaceAvailable, self.exportSpaceAvailable = self.update_space_available()
         self.packagesLog, self.robotsLog = self.trim_logs()
         self.record_warehouse_data()
-        #self.printDebugInfo()
         # ── Periodic summary log (~every 5 sec at 40 tps) ──
         if self.warehouseLoopCount % 200 == 0:
             _n_overdue = sum(1 for p in self.packages if p.timeToDeadline.total_seconds() < 0)
@@ -925,8 +924,6 @@ class Warehouse:
         return self.packagesLog, self.robotsLog
 
     def record_warehouse_data(self):
-        # Time
-        #self.warehouse_data.datetimeStamps = Timeseries_Functions.rollUpdate(self.warehouse_data.datetimeStamps, 1, self.datetimeNow)
         self.warehouse_data.timeElapseds = Timeseries_Functions.rollUpdate(self.warehouse_data.timeElapseds, 1, self.timeElapsed)
         # numPackages
         self.warehouse_data.numPackagesImported = Timeseries_Functions.rollUpdate(self.warehouse_data.numPackagesImported, 1, self.packagesRollingCount)
@@ -937,129 +934,11 @@ class Warehouse:
         self.warehouse_data.numPackagesInMoveList = Timeseries_Functions.rollUpdate(self.warehouse_data.numPackagesInMoveList, 1, len(self.packagesMoveList))
         self.warehouse_data.numPackagesInMovingList = Timeseries_Functions.rollUpdate(self.warehouse_data.numPackagesInMovingList, 1, len(self.packagesMovingList))
         self.warehouse_data.numPackagesExported = Timeseries_Functions.rollUpdate(self.warehouse_data.numPackagesExported, 1, self.packageExportRollingCount)
-        # numChargers
-        # numRobots
         self.warehouse_data.numRobotsInWarehouse = Timeseries_Functions.rollUpdate(self.warehouse_data.numRobotsInWarehouse, 1, self.robotsInWarehouseCount)
         return self
 
-    def printDebugInfo(self):
-        debug_len = 1
-        if self.warehouseLoopCount % 1 == 0:
-            print("--- debug ---")
-            # Warehouse
-            print("- warehouse:")
-            packagesInWarehouseLen = np.count_nonzero(self.packagesInWarehouse)
-            print("- pInWarehouseCount: {}, pInWarehouse: {}".format(self.packagesInWarehouseCount, packagesInWarehouseLen))
-            print("- pInImport: {}, pInStorage: {}, pInExport: {}".format(self.packagesInImportCount, self.packagesInStorageCount, self.packagesInExportCount))
-            print("- pPlannedInImport: {}. pPlannedInStorage: {}, pPlannedInExport: {}".format(self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount))
-            print("- spacesInWarehouse: {}, {}, {}".format(self.importSpaceAvailable, self.storageSpaceAvailable, self.exportSpaceAvailable))
-            # Packages
-            len_packages = len(self.packages)
-            print("- packages: {}, packagesRollingCount: {}".format(len_packages, self.packagesRollingCount))
-            print("- packageExportCount: {}, packageExportRollingCount: {}".format(self.packageExportCount, self.packageExportRollingCount))
-            #if len_packages > debug_len:
-            #    len_packages = debug_len
-            # Packages In Import
-            print("- Packages In Import:")
-            if (self.packagesMoveList) and (not self.packagesMovingList):
-                orig_debug_len = debug_len
-                debug_len = 1000
-            i_count = 0
-            if len_packages > 0:
-                for i in range(0,len_packages):
-                    if self.packages[i].area == "import":
-                        if i_count < debug_len:
-                            print("- package#: {}, tToDeadline: {}, area: {}, areaTgt: {}, status: {}".format(self.packages[i].packageNumber, self.packages[i].timeToDeadline, self.packages[i].area, self.packages[i].areaTarget, self.packages[i].status))
-                            i_count += 1
-            if (self.packagesMoveList) and (not self.packagesMovingList):
-                debug_len = orig_debug_len
-            # Packages In Storage
-            print("- Packages In Storage:")
-            i_count = 0
-            if len_packages > 0:
-                for i in range(0,len_packages):
-                    if self.packages[i].area == "storage":
-                        if i_count < debug_len:
-                            print("- package#: {}, tToDeadline: {}, area: {}, areaTgt: {}, status: {}".format(self.packages[i].packageNumber, self.packages[i].timeToDeadline, self.packages[i].area, self.packages[i].areaTarget, self.packages[i].status))
-                            i_count += 1
-            # Packages In Export
-            print("- Packages In Export:")
-            i_count = 0
-            if len_packages > 0:
-                for i in range(0,len_packages):
-                    if self.packages[i].area == "export":
-                        if i_count < debug_len:
-                            print("- package#: {}, tToDeadline: {}, area: {}, areaTgt: {}, status: {}".format(self.packages[i].packageNumber, self.packages[i].timeToDeadline, self.packages[i].area, self.packages[i].areaTarget, self.packages[i].status))
-                            i_count += 1
-                        # Carried Packages
-            #packagesCarriedIndices = [y for y, x in enumerate(self.packages) if x.status == "carried"]
-            #if packagesCarriedIndices:
-            #    for i in packagesCarriedIndices:
-            #        print("- packageCarried#: {}, xyLocation: {}, xyLocationTarget: {}, status: {}".format(self.packages[i].packageNumber, self.packages[i].xyLocation, self.packages[i].xyLocationTarget, self.packages[i].status))
-            # packagesMoveList
-            len_packagesMoveList = len(self.packagesMoveList)
-            print("- packagesMoveList: {}".format(len_packagesMoveList))
-            #print(self.packagesMoveList)
-            # packagesMovingList
-            len_packagesMovingList = len(self.packagesMovingList)
-            print("- packagesMovingList: {}".format(len_packagesMovingList))
-            #print(self.packagesMovingList)
-            # Packages In MoveList but not in MovingList
-            #len_packages = len(self.packages)
-            #print("- Packages In MoveList but not in MovingList:")
-            #i_count = 0
-            #if len_packages > 0:
-            #    for packageNumber in self.packagesMoveList:
-            #        if packageNumber not in self.packagesMovingList:
-            #            packageIndex = [y for y, x in enumerate(self.packages) if x.packageNumber == packageNumber]
-            #            if packageIndex:
-            #                packageIndex = packageIndex[0]
-            #                #if i_count < debug_len:
-            #                print("- package#: {}, tToDeadline: {}, area: {}, areaTgt: {}, status: {}".format(self.packages[packageIndex].packageNumber, self.packages[packageIndex].timeToDeadline, self.packages[packageIndex].area, self.packages[packageIndex].areaTarget, self.packages[packageIndex].status))
-            #                i_count += 1
-            #print("- # packages in MoveList but not in MovingList: {}".format(i_count))
-            # Packages Log
-            len_packagesLog = len(self.packagesLog)
-            print("- packagesLog: {}".format(len_packagesLog))
-            #if len_packagesLog > debug_len:
-            #    for i in range(len_packagesLog-debug_len,len_packagesLog):
-            #        print("- action: {}, datetimeNow: {}".format(self.packagesLog[i].action, self.packagesLog[i].datetimeNow))
-            # Chargers
-            #len_chargers = len(self.chargers)
-            #print("- chargers: {}, rc: {}".format(len_chargers, self.chargersRollingCount))
-            #if len_chargers > debug_len:
-            #    len_chargers = debug_len
-            #if len_chargers > 0:
-            #    for i in range(0,len_chargers):
-            #        print("- charger#: {}, status: {}, xyLocation: {}".format(self.chargers[i].chargerNumber, self.chargers[i].status, self.chargers[i].xyLocation))
-            # Robots
-            len_robots = len(self.robots)
-            print("- robots: {}, rc: {}".format(len_robots, self.robotsRollingCount))
-            #if len_robots > debug_len:
-            #    len_robots = debug_len
-            #if len_robots > 0:
-            #    for i in range(0,len_robots):
-            #        #print("- robot#: {}, batt%: {}, status = {}, lenActionQ: {}, xyLoc: {}, tgtxyLoc: {}".format(self.robots[i].robotNumber, self.robots[i].batteryPercent, self.robots[i].status, len(self.robots[i].actionQueue), self.robots[i].xyLocation, self.robots[i].xyLocationTarget))
-            #        print("- robot#: {}, actionQueue: {}".format(self.robots[i].robotNumber, self.robots[i].actionQueue))
-            # Robots Task Assignment List
-            #print("- robotsTaskAssignmentList: {}".format(len(self.robotsTaskAssignmentList)))
-            #print(self.robotsTaskAssignmentList)
-            # Robots Log
-            len_robotsLog = len(self.robotsLog)
-            print("- robotsLog: {}".format(len_robotsLog))
-            #if len_robotsLog > debug_len:
-            #    for i in range(len_robotsLog-debug_len,len_robotsLog):
-            #        print("- action: {}, datetimeNow: {}".format(self.robotsLog[i].action, self.robotsLog[i].datetimeNow))
-            
-            # CONDITIONAL CONTINUE
-            #if self.packagesPlannedInStorageCount:
-            #    time.sleep(500)
-            #    exit()
-        return
-
     # Update Packages
     def update_packages(self):
-        #print("- importSpaceAvailable: {}".format(self.importSpaceAvailable))
         # Determine spawn zone: prefer import, fall back to storage, then export
         spawnZoneId = None
         if self.importSpaceAvailable and self.numberOfImportSlots > 0:
@@ -1569,8 +1448,6 @@ class Warehouse:
                 if (robotCarrying == packageNumber) and (self.packages[i].xyLocation != self.robots[robotIndex].xyLocation):
                     newLocation = [self.robots[robotIndex].xyLocation[0],self.robots[robotIndex].xyLocation[1]]
                     self.packages[i].xyLocation = newLocation
-                #print("- robotLocation: {}".format(self.robots[robotIndex].xyLocation))
-                #print("- packageLocation: {}".format(self.packages[i].xyLocation))
         return self.packages
 
     def update_packages_areas(self):
@@ -1676,7 +1553,6 @@ class Warehouse:
             _delivered_at = getattr(self.packages[i], 'deliveredAt', None)
             _cooldown_ok = (_delivered_at is not None) and (_now - _delivered_at >= 2.0)
             if canExport and _cooldown_ok and (packageTimeToDeadline < timedelta(seconds=0)) and (packageStatus == "idle"):
-                #print("- packageTimeToDeadline: {}".format(packageTimeToDeadline))
                 _delivery_time = _now - self.packages[i].createdAt
                 self._flow_export_times.append(_delivery_time)
                 if len(self._flow_export_times) > 200:
@@ -1756,10 +1632,6 @@ class Warehouse:
         _to_remove = [i for i, r in enumerate(self.robots) if getattr(r, '_pending_removal', False)]
         for i in reversed(_to_remove):
             self._remove_robot(i)
-        # Debug
-        #print(self.robots[0].actionQueue)
-        #print(self.robots[0].batteryPercent)
-        #print(self.robots[0].status)
         return self.packages, self.packagesMoveList, self.packagesMovingList, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount, self.robots, self.robotsRollingCount, self.robotsTaskAssignmentList, self.robotsLog, self.chargers
 
     def update_chargers(self):
@@ -1843,7 +1715,6 @@ class Warehouse:
                             chargerAvailable, c = self.find_available_charger(self.robots[i])
                             if (chargerAvailable == True):
                                 chargingStationLocation = self.chargers[c].xyLocation
-                                #print('- chargingStationLocation: {}'.format(chargingStationLocation))
                                 if ("dropoff" not in self.robots[i].status):
                                     _prev_task = self.robots[i].actionQueue[1][1] if len(self.robots[i].actionQueue) > 1 else 'none'
                                     self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_insert_task(i, 0, chargingStationLocation, "move to charging station")
@@ -1852,19 +1723,7 @@ class Warehouse:
                                     _log.info('battery preempt: robot#%d batt=%.1f%% -> charger %s (displaced: %s)',
                                               self.robots[i].robotNumber, self.robots[i].batteryPercent,
                                               chargingStationLocation, _prev_task)
-                                    # Return Package to packagesMoveList
-                                    #robotActionToReturn = self.robots[i].actionQueue[1]
-                                    #packagePosition = robotActionToReturn[0]
-                                    #print("- packagePosition in robot.actionQueue (PRIOR): {}".format([x for x in self.robots[i].actionQueue if x[0] == packagePosition]))
-                                    #packageIndex = [i for i, x in enumerate(self.packages) if x.xyLocation == packagePosition][0]
-                                    #packageNumber = self.packages[packageIndex].packageNumber
-                                    #self.packagesMoveList.append(packageNumber)
-                                    #self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, robotActionToReturn[1])
-                                    #print("- Returned: packageIndex: {}, packageNumber: {}, xyLocation: {}".format(packageIndex, self.packages[packageIndex].packageNumber, self.packages[packageIndex].xyLocation))
-                                    #print("- packageNumber in self.packagesMoveList: {}".format(packageNumber in self.packagesMovelist))
-                                    #print("- packagePosition in robot.actionQueue (POST): {}".format([x for x in self.robots[i].actionQueue if x[0] == packagePosition]))
-                                    # Done Returning
-                                    self.robotsTaskAssignmentList.sort(key=lambda y: y[1], reverse=False) # Sort robotTasksAssignmentList by #tasks
+                                    self.robotsTaskAssignmentList.sort(key=lambda y: y[1], reverse=False)
                                 #print('- Robot #{}: Battery low'.format(i))
                                 #print('- robotTaskAssignmentIndex: {}'.format(robotTaskAssignmentIndex))
                     else:
@@ -1879,8 +1738,6 @@ class Warehouse:
                                 _log.info('battery preempt: robot#%d batt=%.1f%% -> charger %s (idle robot)',
                                           self.robots[i].robotNumber, self.robots[i].batteryPercent,
                                           chargingStationLocation)
-                            #print('- Robot #{}: Battery low'.format(i))
-                            #print('- robotTaskAssignmentIndex: {}'.format(robotTaskAssignmentIndex))
             # Opportunistic top-off: idle robots charge proactively when chargers plentiful
             elif (self.robots[i].batteryPercent <= 70
                   and self._charger_pressure < 0.3
@@ -1928,8 +1785,6 @@ class Warehouse:
                             self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, _tname)
             self.robots[i].batteryPercent = Functions.ensure_limit_1d(self.robots[i].batteryPercent, 0, 100)
         
-        #print(self.robotsTaskAssignmentList[0][0])
-        #print(i)
         return self.robots, self.robotsTaskAssignmentList, self.robotsLog, self.chargers, self.packagesMoveList
     
     @staticmethod
@@ -2123,11 +1978,6 @@ class Warehouse:
             return self.packagesMovingList, self.robots, self.robotsTaskAssignmentList, self.robotsLog
         if not self.packages:
             return self.packagesMovingList, self.robots, self.robotsTaskAssignmentList, self.robotsLog
-        
-        #print('-- pre-update: ')
-        #print('- self.packagesMoveList: {}'.format(str(self.packagesMoveList)))
-        #print('- self.robotsTaskAssignmentList: {}'.format(str(self.robotsTaskAssignmentList)))
-        #print('- self.packagesMovingList: {}'.format(str(self.packagesMovingList)))
         
         if self.packagesMoveList:
             for packageNumber in self.packagesMoveList:

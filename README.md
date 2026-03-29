@@ -16,11 +16,14 @@ A real-time autonomous warehouse simulation. Robots dynamically pick up, transpo
 - **Flow control** — adaptive import cap scaled to fleet size (`pipeline_depth × n_robots`).  Idle-robot bonus pulls more work when capacity is available; overdue penalty backs off only when robots are genuinely busy; 15 %-per-tick smoothing ramps quickly; emergency floor jumps cap if majority of robots idle.  Ceiling is `n_robots × 10`.
 - **Dynamic planning depth** — the package move pipeline is capped at `available_robots × 3` (floor 6) to keep the queue fed without over-planning when many robots are charging or busy.
 - **Task scheduler** — the warehouse assigns packages to robots deadline-first, respects zone capacity, and avoids duplicate movement effort via `packagesMoveList` / `packagesMovingList`.
+- **Physarum-inspired road network** — an organic, traffic-driven road builder observes robot traffic via lifetime + EMA heatmaps, detects hotspots, routes A* paths between them, and classifies the resulting network into three tiers (branch / collector / arterial) with plaza detection around charger clusters.  Roads are rebuilt periodically and erased/restored as zones change.
+- **Traffic-aware pathfinding** — A* pathfinder applies per-tier road preference multipliers (arterial 0.6×, collector 0.7×, branch 1.1×, off-road 1.6×), real-time traffic congestion costs, turn penalties, and soft robot-occupancy costs to produce natural-looking, road-preferring routes.
+- **Road & plaza overlays** — subtle road tier tints and warm-amber plaza tints are composited on the main view and the heatmap sub-view; toggleable in real time with keyboard shortcuts (`H` heatmap, `R` roads, `P` plazas).
 - **Sim / draw decoupling** — simulation ticks at 40 Hz; display repaints at 15 fps independently to save CPU.
 - **Rolling chart histories** — 1 800 samples at 1 sample/s (~30 min), with a dynamic time-window that grows from 30 s to the full history length.
 - **Overflow-safe display** — all number fields use `_n()` (K/M abbreviation), `_fmt_elapsed()` / `_fmt_age()` (decade-aware), `_fmt_rate()` (K/M/s), and a 3-tier cascade (full → drop rate suffix → char-trim + …). The sim is designed to run for days, months, or years without text bleeding out of any panel.
 
-## Dashboard Layout (960 × 540 px)
+## Dashboard Layout (960 × 680 px)
 
 ```
 ┌──────────────────────┬─────────┬─────────┬─────────┬──────────┐
@@ -50,6 +53,8 @@ A real-time autonomous warehouse simulation. Robots dynamically pick up, transpo
 | Pink dots | Overdue packages assigned/en-route |
 | Lavender dots | Export zone, idle, deadline 10–60 s |
 | Bright lavender dots | Export zone, idle, deadline < 10 s |
+| Faint white tint (main view) | Road network overlay (branch / collector / arterial, increasing brightness) |
+| Warm amber tint (main view) | Plaza overlay (charger-cluster gathering zones) |
 
 **Info panel** (4 columns × 240 px) shows:
 - **ROBOTS** — top-7 active robots (sorted by task urgency) + top-7 lowest-battery robots, colour-coded by state. Includes `[−]` / `[+]` buttons for live fleet scaling.
@@ -58,6 +63,14 @@ A real-time autonomous warehouse simulation. Robots dynamically pick up, transpo
 - **PACKAGES** — all packages sorted by deadline urgency with zone, target, carrier, status, weight, item name and destination.
 
 All text is clipped to its column boundary with overflow protection.
+
+**Keyboard shortcuts:**
+
+| Key | Action |
+|-----|--------|
+| `H` | Toggle traffic heatmap overlay |
+| `R` | Toggle road network overlay |
+| `P` | Toggle plaza overlay |
 
 **Chart strip** (4 charts × 240 px) shows a dynamically growing time window (starts at 30 s, expands to 30 min):
 - *Exports & Overdue* — cumulative exports (+ rate), total late (+ rate), and current instantaneous overdue count (+ rate)
@@ -119,6 +132,8 @@ All key parameters live in two places:
 | `packagesMaxMoveQuantity` | `120` | Max packages in the delivery pipeline at once |
 | `robotsTaskAssignmentMaxQuantity` | `3` | Max queued tasks per robot |
 | `_pkg_target_mode` | `nearest` | Target placement mode inside a destination zone (`random`, `nearest`, `zone_edge`) |
+| `_power_policy_mode` | `balanced` | Power policy profile (`eco`, `balanced`, `performance`) |
+| `_flow_pipeline_depth` | `4` | Packages per robot in the delivery pipeline (adjusted by flow policy) |
 
 Zone geometry (pad, thirds) is set in `data/warehouse/warehouse_init.py` → `init_zoneMap`.
 
@@ -172,24 +187,27 @@ robot_warehouse_sim/
     ├── item.py                      # Item dataclass
     ├── address.py                   # Address dataclass
     ├── display/
-    │   └── display_functions.py     # Borderless Win32 window setup
+    │   └── display_functions.py     # Borderless Win32 window setup (Win32 API via ctypes)
     ├── draw/
-    │   └── draw_warehouse.py        # All OpenCV draw helpers (zones, robots, packages, arrows)
+    │   └── draw_warehouse.py        # OpenCV draw helpers (zones, robots, packages, arrows)
     ├── paint/
     │   ├── paint_handler.py         # Interactive zone painting UI (mouse + keyboard)
     │   ├── map_importer.py          # PNG zone/spawn map loader and example generators
     │   ├── zone_strategy.py         # Adaptive zone rebalancing (zone-swap only)
     │   └── warehouse_optimizer.py   # Strategy orchestrator (tick budget, strategy dispatch)
     └── warehouse/
-        ├── warehouse.py             # Core simulation loop, flow control, and all update methods
-        ├── warehouse_init.py        # Grid / zone map initialisation
+        ├── warehouse.py             # Core simulation engine — tick loop, flow control, scheduling
+        ├── warehouse_init.py        # Grid / zone / lane map initialisation
         ├── warehouse_data.py        # Rolling timeseries data container
         ├── warehouse_log.py         # Log record classes (Packages_Log, Robots_Log)
+        ├── pathfinder.py            # A* pathfinder with road preference and traffic awareness
+        ├── road_builder.py          # Physarum-inspired organic road network builder
+        ├── lane_planner.py          # Lane-based path planner (legacy)
         ├── package.py               # Package dataclass
         ├── package_functions.py     # Package spawn, target selection, deadline generation
         ├── charger.py               # Charger dataclass
-        ├── charger_functions.py     # Charger spawn and generation
-        ├── robot.py                 # Robot dataclass
+        ├── charger_functions.py     # Charger spawn and placement
+        ├── robot.py                 # Robot dataclass with motion model
         └── robot_functions.py       # Robot spawn and generation
 ```
 
@@ -211,11 +229,23 @@ After a package is dropped off, a 2-second cooldown prevents instant re-pickup. 
 
 ### Head-on Deadlock Avoidance
 
-Two mechanisms: (1) A* pathfinder treats other robot positions as soft-cost cells (cost 5.0), routing around occupied paths where possible.  (2) When two robots detect a head-on collision, the lower-numbered robot yields by stepping perpendicular.
+Two mechanisms: (1) A* pathfinder treats other robot positions as soft-cost cells (cost 4.0), routing around occupied paths where possible.  (2) When two robots detect a head-on collision, the lower-numbered robot yields by stepping perpendicular.
 
 ### Pathfinding
 
-Dense A* pathfinder: 8-direction, octile heuristic, every-cell waypoints.  Speed profiling annotates each waypoint with a planned speed based on turn severity (corner-only limits: ≥120°→20%, ≥90°→28%, ≥60°→40%, ≥25°→52% of maxVelocity).
+Dense A* pathfinder: 8-direction, octile heuristic (0.6× for admissibility with road discounts), every-cell waypoints.  Speed profiling annotates each waypoint with a planned speed based on turn severity (corner-only limits: ≥120°→20%, ≥90°→28%, ≥60°→40%, ≥25°→52% of maxVelocity).  Road preference multipliers steer robots toward higher-tier roads; traffic congestion costs (up to 1.5) discourage heavily used cells.
+
+### Traffic-Aware Road Network
+
+A Physarum-inspired organic road builder runs periodically (gated on all robots having charged at least once):
+
+1. **Traffic observation** — cumulative lifetime traffic (`traffic_total`) and an exponential moving average (`traffic_ema`, 60 s half-life) are recorded per cell.
+2. **Hotspot detection** — Gaussian blur + non-maximum suppression finds traffic centroids (max 10).
+3. **MST + kNN routing** — minimum spanning tree plus 1 nearest-neighbour shortcut edge connects hotspots; A* paths are computed frame-by-frame (3 per tick) with a flat turn penalty (1.8) and Ramer–Douglas–Peucker smoothing (ε = 2.5).
+4. **Tier classification** — accumulated flow determines branch (50th pct), collector (70th pct), and arterial (90th pct) tiers.
+5. **Road widening** — genuinely thin (1-cell-wide) segments are widened to exactly 2 cells.
+6. **Plaza detection** — dense traffic clusters and charger-adjacent areas are merged into plaza zones (warm-amber tint).
+7. **Zone erasure / restoration** — roads inside zones are erased; roads in neutral space are preserved; displaced robots are evicted.
 
 ---
 
@@ -241,9 +271,7 @@ Dense A* pathfinder: 8-direction, octile heuristic, every-cell waypoints.  Speed
 - **Package location swap** — operator-initiated or scheduler-driven swap of two packages' grid positions (e.g. re-slot a high-urgency package into a more accessible cell), dispatching the minimum robot pair needed to exchange them atomically.
 
 ### Traffic & Fleet Navigation
-- **Road/aisle layer** — user-painted or PNG-loaded travel-lane map; robots prefer (soft) or are restricted to (hard) designated road cells, enabling realistic aisle layouts and directional one-way lanes.
 - Collision avoidance between robots.
-- Optimised robot trajectories (shortest path, A* or similar, acceleration modelling).
 - 3rd-party fleet navigation/traffic/planning management integration.
 - Dynamic real-time optimisation solver for fleet assignment.
 - AI / LLM / VLM-powered real-time warehouse management layer.
