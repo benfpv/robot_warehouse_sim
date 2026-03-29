@@ -199,10 +199,7 @@ class MainGame:
         # Rate-of-change tracking (snapshot every 1s sample)
         self._prev_stats = None   # dict of key→value at last sample
         self._rate_stats = {}     # dict of key→delta/sec
-        # Robot traffic heatmap — accumulated robotsInWarehouse, decayed each tick
-        gw, gh = self.warehouse_res
-        self._robot_heatmap      = np.zeros((gh, gw), dtype=np.float32)  # fast (~8 s half-life)
-        self._robot_heatmap_slow = np.zeros((gh, gw), dtype=np.float32)  # slow (~5 min half-life)
+        # Robot traffic heatmap — now authoritative in warehouse; display derives from it
         # Optimizer action log: ring buffer of (timestamp, action_str), newest last
         self._opt_log: list = []
         self._last_seen_opt_str = ''
@@ -475,27 +472,8 @@ class MainGame:
             return self
 
         # Update Existing
-        self.optimizer.step(self.warehouse, self._robot_heatmap_slow)
+        self.optimizer.step(self.warehouse, self.warehouse.traffic_ema)
         self.warehouse = self.warehouse.update_warehouse()
-        # Accumulate robot traffic heatmap — only moving robots, not idle/charging
-        # Decay is time-anchored: per-tick factor = 0.5^(dt / half_life), so the
-        # visible window stays constant regardless of sim speed or FPS setting.
-        # Half-lives scale with fleet size: fewer robots → longer memory so
-        # patterns still emerge even with 2 robots.
-        _STATIC = {'idle', 'charging'}
-        _n_bots = max(len(self.warehouse.robots), 1)
-        _fast_hl = max(8.0,  120.0 / _n_bots)   # 2 bots→60s,  10→12s, 60→8s
-        _slow_hl = max(300.0, 3600.0 / _n_bots)  # 2 bots→30min, 10→6min, 60→5min
-        self._robot_heatmap      *= 0.5 ** (self.sim_frametime / _fast_hl)
-        self._robot_heatmap_slow *= 0.5 ** (self.sim_frametime / _slow_hl)
-        # Accumulation boost: small fleets add more per step so the heatmap
-        # builds to visible intensity faster.
-        _heat_gain = max(1.0, 10.0 / _n_bots)    # 2 bots→5x, 10→1x, 60→1x
-        for _rb in self.warehouse.robots:
-            if _rb.status not in _STATIC:
-                _rx, _ry = _rb.xyLocation
-                self._robot_heatmap[_ry, _rx]      += _heat_gain
-                self._robot_heatmap_slow[_ry, _rx] += _heat_gain
 
         # Draw (rate-limited independently of sim)
         now = time.time()
@@ -671,23 +649,21 @@ class MainGame:
             cv2.circle(composite, (_cx, _cy), _sub_r, (220, 220, 220), -1)
 
         # Traffic heatmap — row 1, col 2 (dedicated panel, full sw×sh)
+        # Source: warehouse.traffic_ema (objective, 60 s half-life, no fleet-scaling)
         # Normalization: percentile-clip at 98th percentile so isolated hotspots
-        # don't crush the rest of the map to near-zero; then sqrt (gamma 0.5) to
-        # stretch mid-range traffic into the visible part of the colour ramp.
+        # don't crush the rest of the map to near-zero; then power 1.5 gamma
+        # to stretch mid-range traffic into the visible part of the colour ramp.
         # COLORMAP_JET: dark-blue (no/low traffic) → cyan → green → yellow → red
-        # (high traffic) — the "cold to hot" mapping is universally intuitive.
-        # Zero-traffic cells are forced to black so they read as background, not
-        # as the dark-blue end of the colour ramp.
-        _hm_max = self._robot_heatmap.max()
+        # Zero-traffic cells are forced to black so they read as background.
+        _hm_src = self.warehouse.traffic_ema
+        _hm_max = _hm_src.max()
         if _hm_max > 0:
-            _hm_visited = self._robot_heatmap > 0
-            _hm_pct = float(np.percentile(self._robot_heatmap[_hm_visited], 98)) if _hm_visited.any() else _hm_max
+            _hm_visited = _hm_src > 0
+            _hm_pct = float(np.percentile(_hm_src[_hm_visited], 98)) if _hm_visited.any() else _hm_max
             _hm_clip = max(_hm_pct, _hm_max * 0.05)   # never clip below 5 % of true peak
-            # Power 1.5 > 1.0: pushes dim/stale cells toward black, keeps active
-            # hotspots bright — more spatial contrast than sqrt (which boosted mid-range).
-            _hm_norm = np.clip((self._robot_heatmap / _hm_clip) ** 1.5 * 255, 0, 255).astype(np.uint8)
+            _hm_norm = np.clip((_hm_src / _hm_clip) ** 1.5 * 255, 0, 255).astype(np.uint8)
         else:
-            _hm_norm = np.zeros_like(self._robot_heatmap, dtype=np.uint8)
+            _hm_norm = np.zeros_like(_hm_src, dtype=np.uint8)
         _hm_resized = cv2.resize(_hm_norm, (sw, sh), interpolation=cv2.INTER_NEAREST)
         _hm_col = cv2.applyColorMap(_hm_resized, cv2.COLORMAP_JET)
         # Mask unvisited cells back to black (they'd otherwise render as dark blue)
@@ -696,22 +672,41 @@ class MainGame:
         _hm_col[_hm_zero_mask > 0] = (0, 0, 0)
         composite[sh:2*sh, mw+sw*2:mw+sw*3] = _hm_col
 
-        # Slow-heatmap overlay — persistent route layer (~5 min half-life).
+        # Lifetime traffic overlay — persistent route layer (never decays).
+        # Source: warehouse.traffic_total (objective cumulative visit counts).
         # Rendered as a warm-white brightness boost so historically-busy corridors
         # glow even when no robot is currently there, without hiding the JET colours.
-        _slow_max = self._robot_heatmap_slow.max()
+        _slow_src = self.warehouse.traffic_total.astype(np.float32)
+        _slow_max = _slow_src.max()
         if _slow_max > 0:
-            _slow_visited = self._robot_heatmap_slow > 0
-            _slow_pct  = float(np.percentile(self._robot_heatmap_slow[_slow_visited], 98)) if _slow_visited.any() else _slow_max
+            _slow_visited = _slow_src > 0
+            _slow_pct  = float(np.percentile(_slow_src[_slow_visited], 98)) if _slow_visited.any() else _slow_max
             _slow_clip = max(_slow_pct, _slow_max * 0.05)
-            _slow_norm = np.clip((self._robot_heatmap_slow / _slow_clip) ** 1.5 * 255, 0, 255).astype(np.uint8)
+            _slow_norm = np.clip((_slow_src / _slow_clip) ** 1.5 * 255, 0, 255).astype(np.uint8)
             _slow_rsz  = cv2.resize(_slow_norm, (sw, sh), interpolation=cv2.INTER_NEAREST)
             _slow_ov   = cv2.cvtColor(_slow_rsz, cv2.COLOR_GRAY2BGR)
             _slow_zero = cv2.resize(
-                (self._robot_heatmap_slow == 0).astype(np.uint8), (sw, sh), interpolation=cv2.INTER_NEAREST)
+                (_slow_norm == 0).astype(np.uint8), (sw, sh), interpolation=cv2.INTER_NEAREST)
             _slow_ov[_slow_zero > 0] = (0, 0, 0)
             composite[sh:2*sh, mw+sw*2:mw+sw*3] = cv2.addWeighted(
                 composite[sh:2*sh, mw+sw*2:mw+sw*3], 1.0, _slow_ov, 0.30, 0)
+
+        # Road network overlay — MST-derived lanes drawn on top of heatmap.
+        # Road cells: pure white; hotspot centroids: bright green dots.
+        _road = self.warehouse.road_map
+        if _road is not None and _road.any():
+            _road_rsz = cv2.resize(_road, (sw, sh), interpolation=cv2.INTER_NEAREST)
+            _road_mask = _road_rsz > 0
+            _panel = composite[sh:2*sh, mw+sw*2:mw+sw*3]
+            _panel[_road_mask] = (255, 255, 255)
+            # Hotspot centroids as bright green dots
+            _sx = sw / max(self.warehouse_res[0], 1)
+            _sy = sh / max(self.warehouse_res[1], 1)
+            for _hx, _hy in self.warehouse.road_hotspots:
+                _px = int(_hx * _sx + _sx * 0.5)
+                _py = int(_hy * _sy + _sy * 0.5) + sh  # offset into row 1
+                if 0 <= _px < sw and sh <= _py < 2 * sh:
+                    cv2.circle(composite, (mw + sw * 2 + _px, _py), 2, (0, 255, 0), -1)
 
         # Package targets sub-view: arrows on blank canvas, target dots stamped on top
         sub_scale = sw // self.warehouse_res[0]  # 2

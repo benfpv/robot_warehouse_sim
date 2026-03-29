@@ -19,6 +19,7 @@ from data.warehouse.robot import *
 from data.warehouse.robot_functions import *
 from data.warehouse.lane_planner import LanePathPlanner
 from data.warehouse.pathfinder import AStarPathfinder
+from data.warehouse.road_builder import build_road_network
 from data.warehouse.warehouse_data import *
 
 ZONE_NONE = 0
@@ -179,6 +180,20 @@ class Warehouse:
         self.zoneMap = Warehouse_Init.init_zoneMap(self.warehouseWindowRes)
         self.laneMap = None
         self.lanePlanner = None
+        # ── Objective traffic heatmap (simulation-authoritative) ──
+        # traffic_total: lifetime cumulative visit count (never decays)
+        # traffic_ema:   exponential moving average, fixed 60 s half-life
+        # No fleet-scaling or gain boosts — values are objective step counts.
+        _gw, _gh = self.windowRes
+        self.traffic_total = np.zeros((_gh, _gw), dtype=np.uint32)
+        self.traffic_ema   = np.zeros((_gh, _gw), dtype=np.float32)
+        self._traffic_last_time = time.time()
+        # ── Road map (derived from traffic_total, display-only for now) ──
+        self.road_map = np.zeros((_gh, _gw), dtype=np.uint8)
+        self.road_hotspots = []   # list of (x, y) centroids
+        self.road_edges    = []   # MST edge index-pairs into road_hotspots
+        self._road_rebuild_count = 0        # how many times we've rebuilt
+        self._road_last_rebuild = 0.0       # wall-clock time of last rebuild
         self.numberOfImportSlots  = int(np.count_nonzero(self.zoneMap == ZONE_IMPORT))
         self.numberOfStorageSlots = int(np.count_nonzero(self.zoneMap == ZONE_STORAGE))
         self.numberOfExportSlots  = int(np.count_nonzero(self.zoneMap == ZONE_EXPORT))
@@ -436,6 +451,48 @@ class Warehouse:
             _log.info('set_robot_count: target=%d, decommissioning %d robots',
                        target_count, min(delta, len(candidates)))
 
+    # ── Traffic heatmap ─────────────────────────────────────────────
+    _TRAFFIC_EMA_HL = 60.0  # seconds – fixed half-life for EMA layer
+
+    def _maybe_rebuild_roads(self):
+        """Rebuild road network from traffic_total periodically.
+
+        Rebuild interval adapts: fast early (2 s) so roads appear quickly
+        and respond to initial patterns, slowing to 10 s as the network
+        matures (less churn once traffic patterns stabilise).
+        """
+        now = time.time()
+        # Adaptive interval: 2s for first 10 rebuilds, ramps to 10s by rebuild 30
+        interval = min(2.0 + self._road_rebuild_count * 0.27, 10.0)
+        if now - self._road_last_rebuild < interval:
+            return
+        if self.traffic_total.max() == 0:
+            return
+        self._road_last_rebuild = now
+        self._road_rebuild_count += 1
+        self.road_map, self.road_hotspots, self.road_edges = build_road_network(
+            self.traffic_total, self.zoneMap)
+
+    def _update_traffic_heatmap(self):
+        """Accumulate objective robot traffic into simulation-authoritative heatmaps.
+
+        traffic_total: +1 per moving robot per cell per tick (never decays).
+        traffic_ema:   exponential moving average, fixed 60 s half-life.
+        No fleet-scaling or gain boosts — values are objective step counts.
+        """
+        _STATIC = {'idle', 'charging'}
+        now = time.time()
+        dt = max(now - self._traffic_last_time, 0.0)
+        self._traffic_last_time = now
+        # Time-anchored exponential decay
+        if dt > 0:
+            self.traffic_ema *= 0.5 ** (dt / self._TRAFFIC_EMA_HL)
+        for rb in self.robots:
+            if rb.status not in _STATIC:
+                rx, ry = rb.xyLocation
+                self.traffic_total[ry, rx] += 1
+                self.traffic_ema[ry, rx]   += 1.0
+
     def update_warehouse(self):
         """Main simulation tick.  Called once per sim frame (~40 Hz).
 
@@ -448,6 +505,8 @@ class Warehouse:
         #self.printDebugInfo()
         self.datetimeNow = datetime.now() # Update datetime
         self.timeElapsed = time.time() - self.timeStart
+        self._update_traffic_heatmap()
+        self._maybe_rebuild_roads()
         self.update_zone_counts() # Recompute slot counts from zoneMap (supports dynamic zones)
         self.update_flow_control() # Adaptive import throttle based on congestion
         self.reconcile_zone_changes() # Process user-painted cells; partial-flush affected plans
