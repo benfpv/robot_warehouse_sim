@@ -1,125 +1,113 @@
 import random
-import math
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
+import numpy as np
 
 from data.warehouse.warehouse_log import *
 from data.warehouse.package import *
 
+# Zone constants (must match warehouse.py)
+ZONE_NONE = 0
+ZONE_IMPORT = 1
+ZONE_STORAGE = 2
+ZONE_EXPORT = 3
+
+
 class Package_Functions:
-    def import_package(self, numTries, importAreas, numberOfImportAreas, sizeOfImportAreas, packagesRollingCount, packagesInImportCount, packagesPlannedInImportCount, packagesInWarehouseCount, packagesInImportAreas, packagesInWarehouse, packageTargetsInWarehouse, packagesMaxQuantity, packages, packagesLog, itemsList, addressesList, datetimeNow):
+    """Helpers for spawning and positioning packages."""
+
+    def import_package(self, zoneMap, chargersInWarehouse, packagesRollingCount, packagesInImportCount, packagesInWarehouseCount, packagesInWarehouse, packageTargetsInWarehouse, packagesMaxQuantity, packages, packagesLog, itemsList, addressesList, datetimeNow, spawnZoneId=ZONE_IMPORT):
+        """Attempt to spawn one new package in the given zone if capacity allows."""
         if packagesInWarehouseCount < packagesMaxQuantity:
-            # Try to find space for import
-            movePackage, areaLocation, xyLocation = self.try_packageTargetLocation(numTries, importAreas, numberOfImportAreas, sizeOfImportAreas, packagesInImportAreas, packagesInWarehouse, packageTargetsInWarehouse)
-            # If there is space, generate + import package
+            movePackage, xyLocation = self.try_packageTargetLocation(zoneMap, spawnZoneId, packagesInWarehouse, packageTargetsInWarehouse, chargersInWarehouse)
             if (movePackage == True):
-                package = self.generate_package(areaLocation, xyLocation, itemsList, addressesList, packagesRollingCount)
+                zoneNames = {ZONE_IMPORT: 'import', ZONE_STORAGE: 'storage', ZONE_EXPORT: 'export'}
+                spawnArea = zoneNames.get(spawnZoneId, 'neutral')
+                package = self.generate_package(xyLocation, itemsList, addressesList, packagesRollingCount, area=spawnArea)
                 packages.append(package)
                 packagesLog.append(Packages_Log(packagesRollingCount, package, 'import', datetimeNow))
                 packagesRollingCount += 1
                 packagesInImportCount += 1
                 packagesInWarehouseCount += 1
-                #print('- Len packages: {}'.format(len(packages)))
         return packagesRollingCount, packagesInImportCount, packagesInWarehouseCount, packages, packagesLog
 
-    def try_packageTargetLocation(numTries, areas, numberOfAreas, sizeOfAreas, packagesInAreas, packagesInWarehouse, packageTargetsInWarehouse):
-        loc_count = 0
-        # Generate candidate location (n tries)
-        for i in range(0, numTries):
-            #print("- numberOfAreas: {}".format(numberOfAreas))
-            #print("- sizeOfAreas: {}".format(sizeOfAreas))
-            areaRowIndex = random.randint(0, numberOfAreas[0]-1)
-            areaColIndex = random.randint(0, numberOfAreas[1]-1)
-            areaIndicesIndex = random.randint(0, (sizeOfAreas[0] * sizeOfAreas[1])-1)
-            #print("- [areaRowIndex]{}, [areaColIndex]{}, [areaIndicesIndex]{}".format(areaRowIndex, areaColIndex, areaIndicesIndex))
-            if (packagesInAreas[areaRowIndex][areaColIndex][areaIndicesIndex] == 0):
-                # Convert to "areas" format
-                areaIndex = (areaRowIndex*numberOfAreas[0]) + areaColIndex
-                #print("- [areaIndex]{} /{}".format(areaIndex, len(areas)))
-                #print("- area: {}".format(areas[areaIndex]))
-                areaY = math.floor(areaIndicesIndex / sizeOfAreas[0])
-                areaX = areaIndicesIndex % sizeOfAreas[0]
-                areaXY = [areaX, areaY]
-                x = areas[areaIndex][0][0] + areaXY[0]
-                y = areas[areaIndex][0][1] + areaXY[1]
-                #print("- [areaX]{}, [areaY]{}, [areaXY]{}".format(areaX, areaY, areaXY))
-                if (packagesInWarehouse[y][x] == 0) and (packageTargetsInWarehouse[y][x] == 0):
-                    areaLocation = [areaRowIndex, areaColIndex, areaIndicesIndex]
-                    xyLocation = [x, y]
-                    return True, areaLocation, xyLocation
-            loc_count += 1
-        return False, [], []
+    @staticmethod
+    def try_packageTargetLocation(zoneMap, zoneId, packagesInWarehouse, packageTargetsInWarehouse, chargersInWarehouse, reference_xy=None, mode='random'):
+        """Find a free cell in *zoneId* that has no package, planned target, or charger.
 
-    def generate_package(areaLocation, xyLocation, itemsList, addressesList, packageRollingCount):
+        Modes:
+            'random'    — pick a random free cell (even spread, avoids clustering)
+            'nearest'   — pick the closest free cell to reference_xy (min travel)
+            'zone_edge' — pick the closest free cell adjacent to a different zone
+                          (pre-stages for next pipeline move); falls back to nearest
+
+        Returns (True, [x, y]) on success or (False, []) if the zone is full.
+        """
+        mode = str(mode).strip().lower()
+        if mode not in ('random', 'nearest', 'zone_edge'):
+            mode = 'random'
+
+        candidates = np.argwhere(
+            (zoneMap == zoneId) &
+            (packagesInWarehouse == 0) &
+            (packageTargetsInWarehouse == 0) &
+            (chargersInWarehouse == 0)
+        )
+        if len(candidates) == 0:
+            return False, []
+
+        if mode == 'nearest' and reference_xy is not None:
+            rx, ry = reference_xy
+            dists = (candidates[:, 1] - rx) ** 2 + (candidates[:, 0] - ry) ** 2
+            idx = int(np.argmin(dists))
+        elif mode == 'zone_edge' and reference_xy is not None:
+            # Filter to candidates 4-adjacent to a cell of a different zone
+            h, w = zoneMap.shape
+            edge_mask = np.zeros(len(candidates), dtype=bool)
+            for ci in range(len(candidates)):
+                cy, cx = candidates[ci]
+                for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    ny, nx = cy + dy, cx + dx
+                    if 0 <= ny < h and 0 <= nx < w and zoneMap[ny, nx] != zoneId and zoneMap[ny, nx] != 0:
+                        edge_mask[ci] = True
+                        break
+            edge_cands = candidates[edge_mask]
+            if len(edge_cands) > 0:
+                rx, ry = reference_xy
+                dists = (edge_cands[:, 1] - rx) ** 2 + (edge_cands[:, 0] - ry) ** 2
+                idx_e = int(np.argmin(dists))
+                y, x = edge_cands[idx_e]
+                return True, [int(x), int(y)]
+            # Fallback to nearest
+            rx, ry = reference_xy
+            dists = (candidates[:, 1] - rx) ** 2 + (candidates[:, 0] - ry) ** 2
+            idx = int(np.argmin(dists))
+        else:
+            idx = random.randint(0, len(candidates) - 1)
+
+        y, x = candidates[idx]
+        return True, [int(x), int(y)]
+
+    @staticmethod
+    def generate_package(xyLocation, itemsList, addressesList, packageRollingCount, area='import'):
+        """Construct a new Package with randomised item, addresses, and deadline (10–90 s)."""
         itemName = random.sample(sorted(itemsList), 1)[0]
         packageLog = []
-        #print('- itemName: ' + str(itemName))
         itemValues = itemsList[itemName]
-        #print('- itemValues: ' + str(itemValues))
-        addressFrom = random.sample(sorted(addressesList), 1)
-        addressTo = random.sample(sorted(addressesList), 1)
+        addressFrom = random.sample(sorted(addressesList), 1)[0]
+        addressTo = random.sample(sorted(addressesList), 1)[0]
         while addressTo == addressFrom:
-            addressTo = random.sample(sorted(addressesList), 1)
+            addressTo = random.sample(sorted(addressesList), 1)[0]
         todaysDate = datetime.now()
-        # generate deadline
-        deltaDays = timedelta(days=random.randint(0,30))
-        deltaDays = timedelta(days=random.randint(0,1))
-        deltaHours = timedelta(hours=random.randint(0,24))
-        deltaHours = timedelta(hours=random.randint(0,1))
-        deltaMinutes = timedelta(minutes=random.randint(0,60))
-        deltaMinutes = timedelta(minutes=random.randint(0,10))
-        deltaSeconds = timedelta(seconds=random.randint(0,120))
-        #deltaSeconds = timedelta(seconds=random.randint(0,1))
-        deadline = todaysDate + deltaDays + deltaHours + deltaMinutes + deltaSeconds
-        deadline = todaysDate + deltaMinutes + deltaSeconds
-        # calculate timeToDeadline
+        # generate deadline (tight windows for debugging)
+        deltaSeconds = timedelta(seconds=random.randint(10, 90))
+        deadline = todaysDate + deltaSeconds
+        # timeToDeadline is recomputed from deadline each sim tick;
+        # initialise to the full span so the Package constructor has a valid value.
         timeToDeadline = deadline - todaysDate
-        timeToDeadline = timeToDeadline/60
-        #g = random.randint(1,254)
-        #r = random.randint(1,254)
-        #b = random.randint(1,254)
-        #colour = [b, g, r]
-        colour = [120, 120, 120]
-        area = 'import'
+        colour = [160, 140, 110]  # slate-blue default; overwritten by deadline-based colouring
         areaTarget = "none"
-        areaLocationTarget = areaLocation.copy()
         xyLocationTarget = xyLocation.copy()
         status = "idle"
         carrier = -1
-        package = Package(packageRollingCount, packageLog, itemValues, addressFrom, addressTo, deadline, timeToDeadline, colour, area, areaLocation, xyLocation, areaTarget, areaLocationTarget, xyLocationTarget, status, carrier)
+        package = Package(packageRollingCount, packageLog, itemValues, addressFrom, addressTo, deadline, timeToDeadline, colour, area, xyLocation, areaTarget, xyLocationTarget, status, carrier)
         return package
-    
-    def export_package(self, packagesInWarehouseCount, packagesInWarehouseAreas, packages, packagesLog, datetimeNow):
-        if packages:
-            i_count = 0
-            packageIndicesToPop = []
-            for i in packages:
-                if (i.area == 'export') and (i.status == 'idle'):
-                    if i.timeToDeadline.total_seconds() <= 0:
-                        #print('- PastDeadline: package#: ' + str(i.packageNumber) + ', total_seconds: ' + str(i.timeToDeadline.total_seconds()))
-                        packageIndicesToPop.append(i_count)
-                i_count += 1
-            if packageIndicesToPop:
-                # Sort packageIndicesToPop
-                packageIndicesToPop.sort(reverse=True)
-                #print('- All Package Indices to Pop: ' + str(packageIndicesToPop))
-                # Pop indices
-                for ip in packageIndicesToPop:
-                    packages, packagesLog, packagesInWarehouseAreas = self.remove_package_by_package_index(packages, ip, packagesLog, packagesInWarehouseAreas, 'export', datetimeNow)
-        return packagesInWarehouseCount, packagesInWarehouseAreas, packages, packagesLog
-    
-    def remove_package_by_package_index(packages, packageIndex, packagesLog, packagesInWarehouseAreas, packageReasonForRemoval, datetimeNow):
-        package = packages[packageIndex]
-        packageNumber = package.packageNumber
-        packageArea = package.area
-        packageXYLocation = package.xyLocation
-        print('- Popping: index: ' + str(packageIndex) + ', package#: ' + str(packageNumber) + ', area: ' + str(packageArea) + ', xyLocation: ' + str(packageXYLocation))
-        packagesLog.append(PackagesLog(packageNumber, package, packageReasonForRemoval, datetimeNow))
-        if packagesInWarehouseAreas[packageXYLocation[1]][packageXYLocation[0]] == 1:
-            packagesInWarehouseAreas[packageXYLocation[1]][packageXYLocation[0]] = 0
-        else:
-            print('- ERROR: No package exists at that xyLocation. Cannot remove package from packagesInWarehouseAreas.')
-        if package:
-            packages.pop(packageIndex)
-        else:
-            print('- ERROR: No package exists at that packageIndex. Cannot remove package from packages.')
-        return packages, packagesLog, packagesInWarehouseAreas
