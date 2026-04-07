@@ -1,7 +1,19 @@
 import random
-import time
 
-from data.warehouse.robot import *
+from data.warehouse.robot import Robot
+
+
+def try_spawn_location(available_map, grid_a, grid_b, max_attempts=3):
+    """Pick a random free cell from *available_map* (up to *max_attempts* tries).
+
+    Returns [x, y] on success or [] if no free cell was found.
+    A cell is free when both *grid_a* and *grid_b* are 0 at that position.
+    """
+    for _ in range(max_attempts):
+        x, y = available_map[random.randint(0, len(available_map) - 1)]
+        if grid_a[y][x] == 0 and grid_b[y][x] == 0:
+            return [x, y]
+    return []
 
 
 class Robot_Functions:
@@ -27,28 +39,14 @@ class Robot_Functions:
 
         Returns [x, y] on success or [] if no free cell was found.
         """
-        loc_count = 0
-        # Generate candidate coordinate (n tries)
-        while loc_count < 3:
-            randIndex = random.randint(0, len(robotSpawnLocationsAvailableMap)-1)
-            candidateCoordinate = robotSpawnLocationsAvailableMap[randIndex]
-            x = candidateCoordinate[0]
-            y = candidateCoordinate[1]
-            if (robotsInWarehouse[y][x] == 0 and chargersInWarehouse[y][x] == 0):
-                # Cell free of other robots and chargers
-                xyLocation = [x, y]
-                break
-            loc_count += 1
-        if loc_count == 3:
-            return []
-        return xyLocation
+        return try_spawn_location(robotSpawnLocationsAvailableMap, robotsInWarehouse, chargersInWarehouse)
 
     @staticmethod
     def generate_robot(xyLocationSpawn, robotsRollingCount):
         """Construct a new Robot with randomised battery and default motion model."""
         robotNumber = robotsRollingCount
         robotLog = []
-        timerCheckBattery = time.time()
+        timerCheckBattery = 0.0
         batteryPercent = random.randint(80,100)
         batteryChargingRate = random.randint(10,15) * .1
         # 25% more battery capacity: same charge rate, 20% lower drain.

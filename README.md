@@ -300,6 +300,10 @@ A Physarum-inspired organic road builder runs periodically (gated on all robots 
 - Renovation and construction events (temporary zone closures, new sections).
 - Destruction/incident simulation and recovery.
 
+### Dynamic Zones & Mobile Infrastructure
+- **Moving zones** — dynamically repositionable import/storage/export zones (e.g., robots loading packages onto moving trucks or mobile flatbeds). Zones that move bring their contents along; this requires entity-level tracking of which packages belong to which zone and logic to update zone membership dynamically.
+- **New mobile entity types** — trucks, flatbeds, or other container vehicles that can assume import/storage/export zone roles and carry packages as they move. Zone-to-entity binding and collision avoidance between mobile zones and stationary infrastructure.
+
 ### Interfaces & Display
 - Dark mode, light mode, and high-contrast accessibility modes.
 - Graphics/display optimisation for local system (async rendering, GPU acceleration).

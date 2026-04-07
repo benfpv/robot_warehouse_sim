@@ -1,6 +1,5 @@
 """Package data class for the warehouse lifecycle."""
 from datetime import datetime, timedelta
-import time
 
 class Package:
     """A package in the warehouse lifecycle (import → storage → export).
@@ -20,7 +19,7 @@ class Package:
         xyLocationTarget: Destination [x, y] within the target zone.
         status:           'idle', 'move planned', 'carried', or 'error'.
         carrier:          Robot number carrying this package, or -1.
-        createdAt:        Wall-clock timestamp of package spawn.
+        createdAt:        Sim-time stamp of package spawn.
         deliveredAt:      Wall-clock timestamp of last drop-off (delivery cooldown).
         plannedAt:        Wall-clock timestamp when status became 'move planned' (stale-plan eviction).
     """
@@ -39,6 +38,6 @@ class Package:
         self.xyLocationTarget = xyLocationTarget
         self.status = status
         self.carrier = carrier
-        self.createdAt = time.time()
-        self.deliveredAt = None  # stamped when dropped off; used for export cooldown
-        self.plannedAt = None     # stamped when status -> 'move planned'; stale-plan eviction
+        self.createdAt = 0.0   # sim-time stamp, set by warehouse at spawn
+        self.deliveredAt = None  # sim-time stamp when dropped off; used for export cooldown
+        self.plannedAt = None     # sim-time stamp when status -> 'move planned'; stale-plan eviction

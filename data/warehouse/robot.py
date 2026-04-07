@@ -1,6 +1,5 @@
 """Robot data class with motion model and path-planning state."""
-from datetime import date, datetime
-import time
+from datetime import datetime
 
 class Robot:
     """Autonomous warehouse robot.
@@ -26,7 +25,7 @@ class Robot:
         status:            Current action string from robotsActionsList.
         carrying:          Package number being carried, or -1.
         carrier:           (Unused on Robot; mirrors Package.carrier for symmetry.)
-        createdAt:         Wall-clock timestamp of robot creation.
+        createdAt:         Sim-time stamp of robot creation.
 
     Motion model:
         desiredVelocity:     Target speed for this tick (set by speed profile).
@@ -70,7 +69,7 @@ class Robot:
         self.status = status
         self.carrying = carrying
         self.carrier = carrier
-        self.createdAt = time.time()
+        self.createdAt = 0.0   # sim-time stamp, set by warehouse at spawn
         self.batteryDrainMultiplier = 1.0
         # Phase 1 motion model: velocity converges toward desiredVelocity each tick.
         self.desiredVelocity = 0.0

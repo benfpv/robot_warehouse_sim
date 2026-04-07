@@ -1,5 +1,5 @@
 """Core warehouse simulation engine — tick loop, flow control, scheduling, and pathfinding."""
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 import math
 import random
 import logging
@@ -8,23 +8,27 @@ import numpy as np
 import cv2 
 import time
 
-from data.functions import *
-from data.functions_timeseries import *
-from data.warehouse.warehouse_init import *
-from data.warehouse.package import *
-from data.warehouse.package_functions import *
-from data.warehouse.charger import *
-from data.warehouse.charger_functions import *
-from data.warehouse.robot import *
-from data.warehouse.robot_functions import *
+from data.functions import Functions
+from data.functions_timeseries import Timeseries_Functions
+from data.warehouse.warehouse_init import Warehouse_Init
+from data.warehouse.package import Package
+from data.warehouse.package_functions import Package_Functions
+from data.warehouse.charger import Charger
+from data.warehouse.charger_functions import Charger_Functions
+from data.warehouse.robot import Robot, Robot_Log
+from data.warehouse.robot_functions import Robot_Functions
 from data.warehouse.pathfinder import AStarPathfinder
 from data.warehouse.road_builder import RoadBuildJob
-from data.warehouse.warehouse_data import *
+from data.warehouse.warehouse_data import Warehouse_Data
+from data.warehouse.warehouse_log import Robots_Log
 
 ZONE_NONE = 0
 ZONE_IMPORT = 1
 ZONE_STORAGE = 2
 ZONE_EXPORT = 3
+ZONE_NAMES = {ZONE_NONE: 'neutral', ZONE_IMPORT: 'import',
+              ZONE_STORAGE: 'storage', ZONE_EXPORT: 'export'}
+SIM_TICK_RATE = 40  # simulation ticks per second
 
 # ── Module-level logger ────────────────────────────────────────────────
 _log = logging.getLogger('warehouse')
@@ -68,6 +72,11 @@ class Warehouse:
     _POWER_POLICY_MODES = ('eco', 'balanced', 'performance')
     _FLOW_POLICY_MODES = ('steady', 'balanced', 'throughput')
     _PKG_TARGET_MODES = ('random', 'nearest', 'zone_edge')
+
+    @property
+    def _sim_time(self):
+        """Current simulation time in seconds (tick-based, deterministic)."""
+        return self.warehouseLoopCount / SIM_TICK_RATE
 
     def __init__(self,
                     # Window Resolution, Window Center
@@ -186,7 +195,7 @@ class Warehouse:
         _gw, _gh = self.windowRes
         self.traffic_total = np.zeros((_gh, _gw), dtype=np.uint32)
         self.traffic_ema   = np.zeros((_gh, _gw), dtype=np.float32)
-        self._traffic_last_time = time.time()
+        self._traffic_last_time = 0.0  # sim-time of last traffic update
         # ── Road map (derived from traffic_total, display-only for now) ──
         self.road_map = np.zeros((_gh, _gw), dtype=np.uint8)
         self._road_map_prev = np.zeros((_gh, _gw), dtype=np.uint8)
@@ -197,7 +206,7 @@ class Warehouse:
         self._road_flow    = None # persistent flow accumulator for incremental updates
         self._road_job     = None # in-progress RoadBuildJob (frame-distributed)
         self._road_rebuild_count = 0        # how many times we've rebuilt
-        self._road_last_rebuild = 0.0       # wall-clock time of last rebuild
+        self._road_last_rebuild = 0.0       # sim-time of last rebuild
         self.numberOfImportSlots  = int(np.count_nonzero(self.zoneMap == ZONE_IMPORT))
         self.numberOfStorageSlots = int(np.count_nonzero(self.zoneMap == ZONE_STORAGE))
         self.numberOfExportSlots  = int(np.count_nonzero(self.zoneMap == ZONE_EXPORT))
@@ -236,7 +245,7 @@ class Warehouse:
         self._flow_avg_delivery = 0.0    # EMA of delivery time (seconds)
         self._flow_avg_deadline = 0.0    # EMA of time-to-deadline at spawn (seconds)
         self._flow_throughput   = 0.0    # exports per second (EMA)
-        self._flow_last_export_t = time.time()
+        self._flow_last_export_t = 0.0  # sim-time of last export
         self._flow_policy_mode = 'balanced'
         self._flow_ema_alpha    = 0.02   # smoothing factor for EMAs
         # ── Conservative robot-scaled import configuration ──
@@ -479,7 +488,7 @@ class Warehouse:
             return
 
         # ── start new job? ──────────────────────────────────────────────
-        now = time.time()
+        now = self._sim_time
         interval = min(2.0 + self._road_rebuild_count * 0.2, 6.0)
         if now - self._road_last_rebuild < interval:
             return
@@ -578,7 +587,7 @@ class Warehouse:
         No fleet-scaling or gain boosts — values are objective step counts.
         """
         _STATIC = {'idle', 'charging'}
-        now = time.time()
+        now = self._sim_time
         dt = max(now - self._traffic_last_time, 0.0)
         self._traffic_last_time = now
         # Time-anchored exponential decay
@@ -724,9 +733,10 @@ class Warehouse:
             self._flow_import_cap = n_robots * 3
 
         # Track average deadline window from recently spawned packages
-        recent = [p for p in self.packages if (time.time() - p.createdAt) < 2.0]
+        recent = [p for p in self.packages if (self._sim_time - p.createdAt) < 2.0]
         if recent:
-            avg_dl = sum((p.deadline - datetime.fromtimestamp(p.createdAt)).total_seconds() for p in recent) / len(recent)
+            # For recently-spawned packages, timeToDeadline still approximates the full span
+            avg_dl = sum(p.timeToDeadline.total_seconds() for p in recent) / len(recent)
             a = self._flow_ema_alpha
             self._flow_avg_deadline = a * avg_dl + (1 - a) * self._flow_avg_deadline if self._flow_avg_deadline > 0 else avg_dl
 
@@ -806,8 +816,6 @@ class Warehouse:
         changed_cells = self.pending_zone_changes
         self.pending_zone_changes = set()
 
-        ZONE_NAMES      = {ZONE_NONE: 'neutral', ZONE_IMPORT: 'import',
-                           ZONE_STORAGE: 'storage', ZONE_EXPORT: 'export'}
         PICKUP_ACTIONS  = {"move to target pickup location", "pick up target package"}
         DROPOFF_ACTIONS = {"move to target dropoff location", "drop off target package"}
 
@@ -946,7 +954,11 @@ class Warehouse:
         if spawnZoneId is not None:
             # Use adaptive import cap instead of raw packagesMaxQuantity
             _effective_cap = min(self._flow_import_cap, self.packagesMaxQuantity)
+            _prev_count = len(self.packages)
             self.packagesRollingCount, self.packagesInImportCount, self.packagesInWarehouseCount, self.packages, self.packagesLog = Package_Functions.import_package(Package_Functions, self.zoneMap, self.chargersInWarehouse, self.packagesRollingCount, self.packagesInImportCount, self.packagesInWarehouseCount, self.packagesInWarehouse, self.packageTargetsInWarehouse, _effective_cap, self.packages, self.packagesLog, self.itemsList, self.addressesList, self.datetimeNow, spawnZoneId=spawnZoneId) # Import package
+            # Stamp new packages with sim-time
+            for _pi in range(_prev_count, len(self.packages)):
+                self.packages[_pi].createdAt = self._sim_time
         self.packages = self.update_packages_timeToDeadline(self.datetimeNow) # Update package timeToDeadline
         self.packages.sort(key=lambda x: x.deadline, reverse=False) # Sort packages by deadline
         self._reconcile_stale_moving_list()  # Clean orphaned packagesMovingList entries
@@ -1073,7 +1085,7 @@ class Warehouse:
                     self.packages[_zidx].carrier = -1
                     self.packages[_zidx].areaTarget = 'none'
                     self.packages[_zidx].xyLocationTarget = self.packages[_zidx].xyLocation.copy()
-                    self.packages[_zidx].deliveredAt = time.time()
+                    self.packages[_zidx].deliveredAt = self._sim_time
                     self.robots[_zrobot_idx].carrying = -1
                     if _zpkg in self.packagesMovingList:
                         self.packagesMovingList.remove(_zpkg)
@@ -1125,7 +1137,7 @@ class Warehouse:
             'export':  max(0, self.packagesPlannedInExportCount  - free_export),
         }
         evicted = {'import': 0, 'storage': 0, 'export': 0}
-        _now_stale = time.time()
+        _now_stale = self._sim_time
         _STALE_PLAN_TIMEOUT = 5.0  # seconds before an unassigned 'move planned' is reset
         for packageNumber in list(reversed(self.packagesMoveList)):  # snapshot — list is mutated inside loop
             if (packageNumber not in self.packagesMovingList):
@@ -1200,7 +1212,7 @@ class Warehouse:
         total_headroom   = export_headroom + storage_headroom
         new_entries      = 0
 
-        _now = time.time()
+        _now = self._sim_time
         _IMPORT_COOLDOWN = 2.0  # seconds a newly-spawned package must settle before planning
         _DELIVERY_COOLDOWN = 2.0  # seconds after drop-off before re-queuing for next move
 
@@ -1348,7 +1360,7 @@ class Warehouse:
                     if (movePackage == True):
                         self.packages[i].xyLocationTarget = xyLocation.copy()
                         self.packages[i].status = 'move planned'
-                        self.packages[i].plannedAt = time.time()
+                        self.packages[i].plannedAt = self._sim_time
                         self.packageTargetsInWarehouse[xyLocation[1]][xyLocation[0]] = 1
 
         # ── Overdue preemption pass (runs AFTER the main pass) ──
@@ -1395,7 +1407,7 @@ class Warehouse:
                         p.areaTarget = 'export'
                         p.xyLocationTarget = xyLocation.copy()
                         p.status = 'move planned'
-                        p.plannedAt = time.time()
+                        p.plannedAt = self._sim_time
                         self.packageTargetsInWarehouse[xyLocation[1]][xyLocation[0]] = 1
                         self.packagesPlannedInExportCount += 1
                         export_headroom -= 1
@@ -1435,7 +1447,7 @@ class Warehouse:
                     self.packages[i].carrier = -1
                     self.packages[i].areaTarget = 'none'
                     self.packages[i].xyLocationTarget = self.packages[i].xyLocation.copy()
-                    self.packages[i].deliveredAt = time.time()
+                    self.packages[i].deliveredAt = self._sim_time
                     _log.warning('orphan carried pkg#%d: carrier robot#%d not found -- reset to idle',
                                  packageNumber, robotNumber)
                     continue
@@ -1480,7 +1492,7 @@ class Warehouse:
         A 1-second delivery fade blends from cyan toward idle colour after
         drop-off so recently-delivered packages don't snap to grey.
         """
-        _now = time.time()
+        _now = self._sim_time
         _DELIVERY_FADE_SECS = 1.0  # seconds for cyan→idle colour transition after drop-off
         for i in range(len(self.packages)):
             p = self.packages[i]
@@ -1531,7 +1543,7 @@ class Warehouse:
     def package_export(self):
         self.packageExportCount = 0
         lenPackages = len(self.packages)
-        _now = time.time()
+        _now = self._sim_time
         i = 0
         while 1:
             if (not self.packages):
@@ -1596,7 +1608,11 @@ class Warehouse:
     # Update Robots
     def update_robots(self):
         # Import Robot
+        _prev_robot_count = len(self.robots)
         self.robotsRollingCount, self.robotsInWarehouseCount, self.robots, self.robotsTaskAssignmentList = Robot_Functions.import_robot(Robot_Functions, self.robotSpawnMap, self.robotsRollingCount, self.robotsInWarehouseCount, self.robotsMaxQuantity, self.robotsInWarehouse, self.robots, self.robotsTaskAssignmentList, self.chargersInWarehouse) # Import Robot
+        # Stamp new robots with sim-time
+        for _ri in range(_prev_robot_count, len(self.robots)):
+            self.robots[_ri].createdAt = self._sim_time
         # Update self-checks
         self.robots = self.update_robots_batteryPercent() # Deplete batteryPercent
         self.robots, self.robotsTaskAssignmentList, self.robotsLog, self.chargers, self.packagesMoveList = self.update_robots_checkBattery() # Self-check batteryPercent
@@ -1765,7 +1781,7 @@ class Warehouse:
                         self.packages[_epidx].carrier = -1
                         self.packages[_epidx].areaTarget = 'none'
                         self.packages[_epidx].xyLocationTarget = self.packages[_epidx].xyLocation.copy()
-                        self.packages[_epidx].deliveredAt = time.time()
+                        self.packages[_epidx].deliveredAt = self._sim_time
                         self.packageTargetsInWarehouse[self.packages[_epidx].xyLocation[1]][self.packages[_epidx].xyLocation[0]] = 0
                         self.robots[i].carrying = -1
                         # Clean up move/moving lists
@@ -2588,7 +2604,7 @@ class Warehouse:
         self.packages[packageIndex].status = "idle"
         self.packages[packageIndex].areaTarget = "none"
         self.packages[packageIndex].carrier = -1
-        self.packages[packageIndex].deliveredAt = time.time()
+        self.packages[packageIndex].deliveredAt = self._sim_time
         return self.packagesMoveList, self.packagesMovingList, self.packages, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount
 
     def robot_insert_task(self, robotIndex, robotNewActionIndex, robotNewLocation, robotNewAction):

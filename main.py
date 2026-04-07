@@ -11,16 +11,12 @@ import random
 import time
 import cv2
 
-from data.item import *
-from data.importer import *
-from data.functions import *
+from data.importer import Importer
+from data.functions import Functions
 
-from data.warehouse.warehouse_init import *
-from data.warehouse.warehouse import *
-from data.warehouse.package import *
-from data.warehouse.robot import *
-from data.draw.draw_warehouse import *
-from data.display.display_functions import *
+from data.warehouse.warehouse import Warehouse
+from data.draw.draw_warehouse import Draw_Warehouse
+from data.display.display_functions import Display_Functions
 from data.paint.paint_handler import PaintHandler
 from data.paint.map_importer import MapImporter
 from data.paint.warehouse_optimizer import WarehouseOptimizer

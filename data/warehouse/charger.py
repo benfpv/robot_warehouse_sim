@@ -1,5 +1,5 @@
 """Charger data class for stationary charging stations."""
-from datetime import date, datetime
+from datetime import datetime
 
 class Charger:
     """A stationary charging station.
