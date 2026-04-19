@@ -1,11 +1,7 @@
 import cv2
 import numpy as np
 
-# Zone constants (must match warehouse.py)
-ZONE_NONE    = 0
-ZONE_IMPORT  = 1
-ZONE_STORAGE = 2
-ZONE_EXPORT  = 3
+from data.constants import ZONE_NONE, ZONE_IMPORT, ZONE_STORAGE, ZONE_EXPORT
 
 
 class PaintHandler:

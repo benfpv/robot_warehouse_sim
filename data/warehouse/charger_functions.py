@@ -39,7 +39,8 @@ class Charger_Functions:
         chargerNumber = chargersRollingCount
         colour = (50, 190, 230)
         area = 'neutral'
-        xyLocation = xyLocationSpawn
+        # Copy to avoid aliasing the caller's spawn-location list (matches Robot_Functions.generate_robot).
+        xyLocation = list(xyLocationSpawn)
         status = 'idle'
         charger = Charger(chargerNumber, colour, area, xyLocation, status)
         return charger

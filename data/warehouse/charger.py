@@ -15,7 +15,7 @@ class Charger:
         self.chargerNumber = chargerNumber
         self.colour = colour
         self.area = area
-        self.xyLocation = xyLocation
+        self.xyLocation = list(xyLocation)
         self.status = status
 
 class Charger_Log:

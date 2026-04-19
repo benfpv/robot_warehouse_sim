@@ -33,7 +33,7 @@ class Package:
         self.timeToDeadline = timeToDeadline
         self.colour = colour
         self.area = area
-        self.xyLocation = xyLocation
+        self.xyLocation = list(xyLocation)
         self.areaTarget = areaTarget
         self.xyLocationTarget = xyLocationTarget
         self.status = status

@@ -4,14 +4,7 @@ import numpy as np
 
 from data.warehouse.warehouse_log import Packages_Log
 from data.warehouse.package import Package
-
-# Zone constants (must match warehouse.py)
-ZONE_NONE = 0
-ZONE_IMPORT = 1
-ZONE_STORAGE = 2
-ZONE_EXPORT = 3
-ZONE_NAMES = {ZONE_NONE: 'neutral', ZONE_IMPORT: 'import',
-              ZONE_STORAGE: 'storage', ZONE_EXPORT: 'export'}
+from data.constants import ZONE_NONE, ZONE_IMPORT, ZONE_STORAGE, ZONE_EXPORT, ZONE_NAMES
 
 
 class Package_Functions:

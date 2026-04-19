@@ -5,6 +5,7 @@ window with 8 sub-views, a 4-column info panel, and a 4-chart strip.
 All display, mouse, and keyboard interaction is handled here.
 """
 import os
+import logging
 import numpy as np
 import math
 import random
@@ -236,19 +237,22 @@ class MainGame:
         self.draw_frametime = 1.0 / float(fps)
         print('[main] Display FPS -> {}'.format(fps))
 
+    @staticmethod
+    def _horizontal_button_layout(items, x0, y0, btn_w=34, btn_h=11, gap=3):
+        """Build a horizontal row of button rects from a list of items.
+
+        Returns [(item, bx0, y0, bx1, y1), ...].
+        *x0* is the left edge of the first button.
+        """
+        layout = []
+        for i, item in enumerate(items):
+            bx0 = x0 + i * (btn_w + gap)
+            layout.append((item, bx0, y0, bx0 + btn_w, y0 + btn_h))
+        return layout
+
     def _display_fps_button_layout(self):
         # Anchored to top-left of the main view so it does not overlap info-panel controls.
-        x0 = 106
-        y0 = 4
-        btn_w = 22
-        btn_h = 11
-        gap = 3
-        layout = []
-        for i, fps in enumerate(self._DISPLAY_FPS_OPTIONS):
-            bx0 = x0 + i * (btn_w + gap)
-            bx1 = bx0 + btn_w
-            layout.append((fps, bx0, y0, bx1, y0 + btn_h))
-        return layout
+        return self._horizontal_button_layout(self._DISPLAY_FPS_OPTIONS, x0=106, y0=4, btn_w=22)
 
     def _handle_display_fps_click(self, event, px, py):
         if event != cv2.EVENT_LBUTTONDOWN:
@@ -275,37 +279,19 @@ class MainGame:
         mh = self.warehouse_windowRes[1]
         cw = self.composite_windowRes[0]
         col_w = cw // 4
-        pad_x = 4
-        gap = 3
-        btn_h = 11
         btn_w = 34
-        total_w = btn_w * 3 + gap * 2
-        x0 = col_w * 2 - pad_x - total_w
-        y0 = mh + 3
-        layout = []
-        for i, mode in enumerate(self._POWER_POLICY_MODES):
-            bx0 = x0 + i * (btn_w + gap)
-            bx1 = bx0 + btn_w
-            layout.append((mode, bx0, y0, bx1, y0 + btn_h))
-        return layout
+        total_w = btn_w * len(self._POWER_POLICY_MODES) + 3 * (len(self._POWER_POLICY_MODES) - 1)
+        x0 = col_w * 2 - 4 - total_w
+        return self._horizontal_button_layout(self._POWER_POLICY_MODES, x0, mh + 3, btn_w=btn_w)
 
     def _flow_policy_button_layout(self):
         mh = self.warehouse_windowRes[1]
         cw = self.composite_windowRes[0]
         col_w = cw // 4
-        pad_x = 4
-        gap = 3
-        btn_h = 11
         btn_w = 34
-        total_w = btn_w * 3 + gap * 2
-        x0 = col_w * 3 - pad_x - total_w
-        y0 = mh + 3
-        layout = []
-        for i, mode in enumerate(self._FLOW_POLICY_MODES):
-            bx0 = x0 + i * (btn_w + gap)
-            bx1 = bx0 + btn_w
-            layout.append((mode, bx0, y0, bx1, y0 + btn_h))
-        return layout
+        total_w = btn_w * len(self._FLOW_POLICY_MODES) + 3 * (len(self._FLOW_POLICY_MODES) - 1)
+        x0 = col_w * 3 - 4 - total_w
+        return self._horizontal_button_layout(self._FLOW_POLICY_MODES, x0, mh + 3, btn_w=btn_w)
 
     def _handle_power_policy_click(self, event, px, py):
         if event != cv2.EVENT_LBUTTONDOWN:
@@ -335,20 +321,10 @@ class MainGame:
     def _pkg_target_button_layout(self):
         mh = self.warehouse_windowRes[1]
         cw = self.composite_windowRes[0]
-        col_w = cw // 4
-        pad_x = 4
-        gap = 3
-        btn_h = 11
         btn_w = 38
-        total_w = btn_w * 3 + gap * 2
-        x0 = cw - pad_x - total_w
-        y0 = mh + 3
-        layout = []
-        for i, mode in enumerate(self._PKG_TARGET_MODES):
-            bx0 = x0 + i * (btn_w + gap)
-            bx1 = bx0 + btn_w
-            layout.append((mode, bx0, y0, bx1, y0 + btn_h))
-        return layout
+        total_w = btn_w * len(self._PKG_TARGET_MODES) + 3 * (len(self._PKG_TARGET_MODES) - 1)
+        x0 = cw - 4 - total_w
+        return self._horizontal_button_layout(self._PKG_TARGET_MODES, x0, mh + 3, btn_w=btn_w)
 
     def _handle_pkg_target_mode_click(self, event, px, py):
         if event != cv2.EVENT_LBUTTONDOWN:
@@ -613,207 +589,10 @@ class MainGame:
             _ty = by0 + (by1 - by0 + _th) // 2
             cv2.putText(composite, _lbl, (_tx, _ty), _fps_font, 0.24, _txt_col, 1)
 
-        # Binary sub-views: multiply by 255, resize, convert to BGR
-        def place_binary(arr, row, col):
-            img = cv2.resize((arr * 255).astype(np.uint8), (sw, sh), interpolation=cv2.INTER_NEAREST)
-            composite[row*sh:(row+1)*sh, mw+col*sw:mw+(col+1)*sw] = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        # ESC hint — dim label right of FPS buttons
+        cv2.putText(composite, 'ESC: exit', (160, 13), _fps_font, 0.24, (70, 70, 70), 1)
 
-        place_binary(self.warehouse.chargersInWarehouse,        0, 0)
-        place_binary(self.warehouse.packagesInWarehouse,        0, 1)
-        place_binary(self.warehouse.robotsInWarehouse,          1, 0)
-
-        _sub_ox = mw
-        _sub_oy = sh
-        _sub_sx = sw / max(self.warehouse_res[0], 1)
-        _sub_sy = sh / max(self.warehouse_res[1], 1)
-        _sub_cell = min(_sub_sx, _sub_sy)
-        _sub_r    = max(int(_sub_cell * 0.55), 1)
-
-        # Subtle dark-grey road underlay on robots panel
-        _road_rb = self.warehouse.road_map
-        if _road_rb is not None and _road_rb.any():
-            _road_rb_rsz = cv2.resize(_road_rb, (sw, sh), interpolation=cv2.INTER_NEAREST)
-            _rb_panel = composite[sh:2*sh, mw:mw+sw]
-            _rb_road_mask = _road_rb_rsz > 0
-            # Lighten road cells very subtly: dark grey tint over the black background
-            _rb_panel[_rb_road_mask] = np.clip(
-                _rb_panel[_rb_road_mask].astype(np.int16) + 30, 0, 255).astype(np.uint8)
-
-        # Speed-profile legend: tiny horizontal gradient bar (slow→fast).
-        _sp_x0 = _sub_ox + sw - 50
-        _sp_y0 = _sub_oy + sh - 10
-        _sp_w = 36
-        _sp_h = 5
-        cv2.rectangle(composite, (_sp_x0 - 1, _sp_y0 - 1), (_sp_x0 + _sp_w + 1, _sp_y0 + _sp_h + 1), (18, 18, 18), -1)
-        for _gi in range(_sp_w):
-            _gt = _gi / max(_sp_w - 1, 1)
-            _gt = max(0.0, min(1.0, _gt))
-            if _gt <= 0.5:
-                _gs = _gt * 2.0
-                _gc = (int(60 - 10 * _gs), int(80 + 120 * _gs), int(220))
-            else:
-                _gs = (_gt - 0.5) * 2.0
-                _gc = (int(50 + 180 * _gs), int(200 + 10 * _gs), int(220 - 150 * _gs))
-            cv2.line(composite, (_sp_x0 + _gi, _sp_y0), (_sp_x0 + _gi, _sp_y0 + _sp_h - 1), _gc, 1)
-        cv2.putText(composite, 'spd', (_sp_x0 + _sp_w + 2, _sp_y0 + _sp_h - 1),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.2, (100, 100, 100), 1)
-
-        def _speed_to_bgr(t):
-            """Map normalised speed t in [0,1] to a BGR colour.
-
-            Gradient: red (slow, t=0) → yellow (t=0.5) → cyan (fast, t=1).
-            """
-            t = max(0.0, min(1.0, t))
-            if t <= 0.5:
-                s = t * 2.0
-                return (int(60 - 10 * s), int(80 + 120 * s), int(220))
-            s = (t - 0.5) * 2.0
-            return (int(50 + 180 * s), int(200 + 10 * s), int(220 - 150 * s))
-
-        for _rb in self.warehouse.robots:
-            # Planned path preview (A* waypoints) on robots sub-view only.
-            _path_cells = [list(_rb.xyLocation)]
-            _rb_path = list(getattr(_rb, 'path', []))
-            if _rb_path:
-                _path_cells.extend([list(_p) for _p in _rb_path])
-            elif getattr(_rb, 'xyLocationTarget', None) and list(_rb.xyLocationTarget) != list(_rb.xyLocation):
-                _path_cells.append(list(_rb.xyLocationTarget))
-            elif getattr(_rb, 'pathTarget', None):
-                _path_cells.append(list(_rb.pathTarget))
-            elif getattr(_rb, 'actionQueue', None):
-                _path_cells.append(list(_rb.actionQueue[0][0]))
-
-            # Draw speed-profiled path: each segment coloured by planned speed.
-            _rb_plan = list(getattr(_rb, 'pathPlan', []))
-            _rb_max_v = max(float(getattr(_rb, 'maxVelocity', 0.6)), 0.01)
-            if len(_path_cells) >= 2:
-                for _seg_i in range(len(_path_cells) - 1):
-                    _p0 = _path_cells[_seg_i]
-                    _p1 = _path_cells[_seg_i + 1]
-                    _sx0 = int(_p0[0] * _sub_sx + _sub_sx * 0.5) + _sub_ox
-                    _sy0 = int(_p0[1] * _sub_sy + _sub_sy * 0.5) + _sub_oy
-                    _sx1 = int(_p1[0] * _sub_sx + _sub_sx * 0.5) + _sub_ox
-                    _sy1 = int(_p1[1] * _sub_sy + _sub_sy * 0.5) + _sub_oy
-                    # pathPlan[k] aligns with path[k] = _path_cells[k+1]
-                    _plan_idx = _seg_i  # index into pathPlan for destination cell
-                    if _rb_plan and 0 <= _plan_idx < len(_rb_plan):
-                        _seg_spd = _rb_plan[_plan_idx].get('speed', _rb_max_v * 0.5)
-                    else:
-                        _seg_spd = _rb_max_v * 0.5
-                    _t = _seg_spd / _rb_max_v
-                    _seg_col = _speed_to_bgr(_t)
-                    cv2.line(composite, (_sx0, _sy0), (_sx1, _sy1), _seg_col, 1, cv2.LINE_AA)
-
-                # Corner markers: small dots at planned sharp turns.
-                for _mi in range(len(_rb_plan)):
-                    if _rb_plan[_mi].get('turn_deg', 0) >= 40.0:
-                        _pc = _path_cells[_mi + 1] if _mi + 1 < len(_path_cells) else None
-                        if _pc is not None:
-                            _mx = int(_pc[0] * _sub_sx + _sub_sx * 0.5) + _sub_ox
-                            _my = int(_pc[1] * _sub_sy + _sub_sy * 0.5) + _sub_oy
-                            _mt = _rb_plan[_mi].get('speed', _rb_max_v * 0.5) / _rb_max_v
-                            cv2.circle(composite, (_mx, _my), max(int(_sub_cell * 0.3), 1),
-                                       _speed_to_bgr(_mt), -1)
-
-            _cx = int(_rb.xyLocation[0] * _sub_sx + _sub_sx * 0.5) + _sub_ox
-            _cy = int(_rb.xyLocation[1] * _sub_sy + _sub_sy * 0.5) + _sub_oy
-            cv2.circle(composite, (_cx, _cy), _sub_r + 1, (0, 0, 0), -1)
-            cv2.circle(composite, (_cx, _cy), _sub_r, (220, 220, 220), -1)
-
-        # Traffic heatmap — row 1, col 2 (dedicated panel, full sw×sh)
-        # Source: warehouse.traffic_ema (objective, 60 s half-life, no fleet-scaling)
-        # Normalization: percentile-clip at 98th percentile so isolated hotspots
-        # don't crush the rest of the map to near-zero; then power 1.5 gamma
-        # to stretch mid-range traffic into the visible part of the colour ramp.
-        # COLORMAP_JET: dark-blue (no/low traffic) → cyan → green → yellow → red
-        # Zero-traffic cells are forced to black so they read as background.
-        if self._show_heatmap:
-            _hm_src = self.warehouse.traffic_ema
-            _hm_max = _hm_src.max()
-            if _hm_max > 0:
-                _hm_visited = _hm_src > 0
-                _hm_pct = float(np.percentile(_hm_src[_hm_visited], 98)) if _hm_visited.any() else _hm_max
-                _hm_clip = max(_hm_pct, _hm_max * 0.05)   # never clip below 5 % of true peak
-                _hm_norm = np.clip((_hm_src / _hm_clip) ** 1.5 * 255, 0, 255).astype(np.uint8)
-            else:
-                _hm_norm = np.zeros_like(_hm_src, dtype=np.uint8)
-            _hm_resized = cv2.resize(_hm_norm, (sw, sh), interpolation=cv2.INTER_NEAREST)
-            _hm_col = cv2.applyColorMap(_hm_resized, cv2.COLORMAP_JET)
-            # Mask unvisited cells back to black (they'd otherwise render as dark blue)
-            _hm_zero_mask = cv2.resize(
-                (_hm_norm == 0).astype(np.uint8), (sw, sh), interpolation=cv2.INTER_NEAREST)
-            _hm_col[_hm_zero_mask > 0] = (0, 0, 0)
-            composite[sh:2*sh, mw+sw*2:mw+sw*3] = _hm_col
-
-            # Lifetime traffic overlay — persistent route layer (never decays).
-            # Source: warehouse.traffic_total (objective cumulative visit counts).
-            # Rendered as a warm-white brightness boost so historically-busy corridors
-            # glow even when no robot is currently there, without hiding the JET colours.
-            _slow_src = self.warehouse.traffic_total.astype(np.float32)
-            _slow_max = _slow_src.max()
-            if _slow_max > 0:
-                _slow_visited = _slow_src > 0
-                _slow_pct  = float(np.percentile(_slow_src[_slow_visited], 98)) if _slow_visited.any() else _slow_max
-                _slow_clip = max(_slow_pct, _slow_max * 0.05)
-                _slow_norm = np.clip((_slow_src / _slow_clip) ** 1.5 * 255, 0, 255).astype(np.uint8)
-                _slow_rsz  = cv2.resize(_slow_norm, (sw, sh), interpolation=cv2.INTER_NEAREST)
-                _slow_ov   = cv2.cvtColor(_slow_rsz, cv2.COLOR_GRAY2BGR)
-                _slow_zero = cv2.resize(
-                    (_slow_norm == 0).astype(np.uint8), (sw, sh), interpolation=cv2.INTER_NEAREST)
-                _slow_ov[_slow_zero > 0] = (0, 0, 0)
-                composite[sh:2*sh, mw+sw*2:mw+sw*3] = cv2.addWeighted(
-                    composite[sh:2*sh, mw+sw*2:mw+sw*3], 1.0, _slow_ov, 0.30, 0)
-
-        # Road network overlay — subtle semi-transparent over heatmap.
-        # Blended so the heatmap colours remain clearly visible underneath.
-        _road = self.warehouse.road_map
-        if self._show_roads and _road is not None and _road.any():
-            _road_rsz = cv2.resize(_road, (sw, sh), interpolation=cv2.INTER_NEAREST)
-            _panel = composite[sh:2*sh, mw+sw*2:mw+sw*3]
-            # Build a white overlay with per-tier alpha intensity
-            _road_alpha = np.zeros((sh, sw), dtype=np.float32)
-            _road_alpha[_road_rsz == 1] = 0.20   # branches: faint
-            _road_alpha[_road_rsz == 2] = 0.30   # collectors: visible
-            _road_alpha[_road_rsz >= 3] = 0.42   # arterials: clear but not opaque
-            _alpha_3ch = _road_alpha[:, :, np.newaxis]
-            _white = np.full_like(_panel, 255, dtype=np.uint8)
-            _panel[:] = np.clip(
-                _panel.astype(np.float32) * (1.0 - _alpha_3ch) + _white.astype(np.float32) * _alpha_3ch,
-                0, 255).astype(np.uint8)
-            # Hotspot dots — small, semi-transparent
-            _sx = sw / max(self.warehouse_res[0], 1)
-            _sy = sh / max(self.warehouse_res[1], 1)
-            _hs_list = self.warehouse.road_hotspots
-            _hs_top = _hs_list[0][2] if _hs_list else 1.0
-            for _hx, _hy, _hi in _hs_list:
-                _px = int(_hx * _sx + _sx * 0.5)
-                _py = int(_hy * _sy + _sy * 0.5) + sh
-                if 0 <= _px < sw and sh <= _py < 2 * sh:
-                    _ratio = _hi / max(_hs_top, 1e-9)
-                    _hcol = (0, 220, 80) if _ratio >= 0.5 else (160, 160, 0)
-                    cv2.circle(composite, (mw + sw * 2 + _px, _py), 1, _hcol, -1)
-
-        # Plaza overlay — tinted area fill (distinct from road lines)
-        _plaza = self.warehouse.plaza_map
-        if self._show_plazas and _plaza is not None and _plaza.any():
-            _plz_rsz = cv2.resize(_plaza, (sw, sh), interpolation=cv2.INTER_NEAREST)
-            _panel = composite[sh:2*sh, mw+sw*2:mw+sw*3]
-            _plz_mask = _plz_rsz > 0
-            _plz_tint = np.array([180, 140, 60], dtype=np.float32)  # warm amber (BGR)
-            _plz_alpha = 0.25
-            _panel[_plz_mask] = np.clip(
-                _panel[_plz_mask].astype(np.float32) * (1.0 - _plz_alpha)
-                + _plz_tint * _plz_alpha,
-                0, 255).astype(np.uint8)
-
-        # Package targets sub-view: arrows on blank canvas, target dots stamped on top
-        sub_scale = sw // self.warehouse_res[0]  # 2
-        pkg_tgt_img = np.zeros((sh, sw, 3), dtype=np.uint8)
-        Draw_Warehouse.draw_package_arrows(pkg_tgt_img, self.warehouse.packages, sub_scale)
-        tgt_resized = cv2.resize((self.warehouse.packageTargetsInWarehouse * 255).astype(np.uint8),
-                                  (sw, sh), interpolation=cv2.INTER_NEAREST)
-        pkg_tgt_img[tgt_resized > 0] = (255, 255, 255)
-        composite[sh:2*sh, mw+sw:mw+2*sw] = pkg_tgt_img
+        self._draw_subviews(composite, mw, mh, sw, sh)
 
         # ── Slot (row 1, col 3): DEADLINES (top) + FLEET BATT (bottom) ──────────────────
         # Panel is 160×140 px: top 70 px → deadline urgency histogram,
@@ -1641,52 +1420,7 @@ class MainGame:
             _draw_pkg(col_w * 3 + pad_x, y, _pkgs_deadline[pi], cw)
 
         # Update rolling chart histories (sample once per second via wall-clock)
-        if time.time() - self._hist_last_sample >= 1.0:
-            self._hist_last_sample = time.time()
-            overdue = sum(1 for p in self.warehouse.packages if p.timeToDeadline.total_seconds() < 0)
-            self._late_total += overdue   # accumulate: each 1-s sample adds current late count
-            mean_batt = float(np.mean([r.batteryPercent for r in self.warehouse.robots])) if self.warehouse.robots else 0.0
-            _charge_cutoff = getattr(self.warehouse, '_charge_threshold', 20)
-            charging    = sum(1 for r in self.warehouse.robots if r.status == "charging")
-            idle_count  = sum(1 for r in self.warehouse.robots if r.status == "idle")
-            working     = len(self.warehouse.robots) - charging - idle_count
-            self._hist_imported = np.roll(self._hist_imported, -1); self._hist_imported[-1] = self.warehouse.packagesRollingCount
-            self._hist_exported = np.roll(self._hist_exported, -1); self._hist_exported[-1] = self.warehouse.packageExportRollingCount
-            self._hist_overdue  = np.roll(self._hist_overdue,  -1); self._hist_overdue[-1]  = overdue
-            self._hist_late     = np.roll(self._hist_late,     -1); self._hist_late[-1]     = self._late_total
-            self._hist_batt         = np.roll(self._hist_batt,         -1); self._hist_batt[-1]         = mean_batt
-            self._hist_robots       = np.roll(self._hist_robots,       -1); self._hist_robots[-1]       = len(self.warehouse.robots)
-            self._hist_working      = np.roll(self._hist_working,      -1); self._hist_working[-1]      = working
-            self._hist_charging     = np.roll(self._hist_charging,     -1); self._hist_charging[-1]     = charging
-            self._hist_idle         = np.roll(self._hist_idle,         -1); self._hist_idle[-1]         = idle_count
-            # Flow control histories
-            self._hist_import_cap   = np.roll(self._hist_import_cap,   -1); self._hist_import_cap[-1]   = getattr(wh, '_flow_import_cap', wh.packagesMaxQuantity)
-            self._hist_throughput   = np.roll(self._hist_throughput,   -1); self._hist_throughput[-1]   = getattr(wh, '_flow_throughput', 0) * 60  # per minute for readability
-            self._hist_delivery     = np.roll(self._hist_delivery,     -1); self._hist_delivery[-1]     = getattr(wh, '_flow_avg_delivery', 0)
-            n_pkgs = max(len(wh.packages), 1)
-            self._hist_overdue_pct  = np.roll(self._hist_overdue_pct,  -1); self._hist_overdue_pct[-1]  = overdue / n_pkgs * 100
-            self._hist_count    = min(self._hist_count + 1, len(self._hist_exported))
-            # Rate-of-change: compare with previous snapshot
-            wh = self.warehouse
-            cur = {
-                "loops":    wh.warehouseLoopCount,
-                "export":   wh.packageExportRollingCount,
-                "pkgs":     wh.packagesInWarehouseCount,
-                "robots":   len(wh.robots),
-                "import":   wh.packagesInImportCount,
-                "storage":  wh.packagesInStorageCount,
-                "expzone":  wh.packagesInExportCount,
-                "overdue":  overdue,
-                "tot_imp":  wh.packagesRollingCount,
-                "tot_late": self._late_total,
-                "batt":     mean_batt,
-                "working":  working,
-                "chging":   charging,
-                "idle":     idle_count,
-            }
-            if self._prev_stats is not None:
-                self._rate_stats = {k: cur[k] - self._prev_stats.get(k, cur[k]) for k in cur}
-            self._prev_stats = cur
+        self._sample_chart_histories()
 
         # Draw charts strip
         composite[mh + ph, :] = 55  # chart separator
@@ -1727,8 +1461,237 @@ class MainGame:
 
         cv2.imshow("warehouse", composite)
         key = cv2.waitKey(1) & 0xFF
+        if key == 27:  # ESC
+            self.gameEnd()
         self.paint_handler.handle_key(key)
         return self
+
+    def _draw_subviews(self, composite, mw, mh, sw, sh):
+        """Render binary grids, robot paths, traffic heatmap, and package targets."""
+        def place_binary(arr, row, col):
+            img = cv2.resize((arr * 255).astype(np.uint8), (sw, sh), interpolation=cv2.INTER_NEAREST)
+            composite[row*sh:(row+1)*sh, mw+col*sw:mw+(col+1)*sw] = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+        place_binary(self.warehouse.chargersInWarehouse,        0, 0)
+        place_binary(self.warehouse.packagesInWarehouse,        0, 1)
+        place_binary(self.warehouse.robotsInWarehouse,          1, 0)
+
+        _sub_ox = mw
+        _sub_oy = sh
+        _sub_sx = sw / max(self.warehouse_res[0], 1)
+        _sub_sy = sh / max(self.warehouse_res[1], 1)
+        _sub_cell = min(_sub_sx, _sub_sy)
+        _sub_r    = max(int(_sub_cell * 0.55), 1)
+
+        # Subtle dark-grey road underlay on robots panel
+        _road_rb = self.warehouse.road_map
+        if _road_rb is not None and _road_rb.any():
+            _road_rb_rsz = cv2.resize(_road_rb, (sw, sh), interpolation=cv2.INTER_NEAREST)
+            _rb_panel = composite[sh:2*sh, mw:mw+sw]
+            _rb_road_mask = _road_rb_rsz > 0
+            _rb_panel[_rb_road_mask] = np.clip(
+                _rb_panel[_rb_road_mask].astype(np.int16) + 30, 0, 255).astype(np.uint8)
+
+        # Speed-profile legend
+        _sp_x0 = _sub_ox + sw - 50
+        _sp_y0 = _sub_oy + sh - 10
+        _sp_w = 36
+        _sp_h = 5
+        cv2.rectangle(composite, (_sp_x0 - 1, _sp_y0 - 1), (_sp_x0 + _sp_w + 1, _sp_y0 + _sp_h + 1), (18, 18, 18), -1)
+        for _gi in range(_sp_w):
+            _gt = _gi / max(_sp_w - 1, 1)
+            _gt = max(0.0, min(1.0, _gt))
+            if _gt <= 0.5:
+                _gs = _gt * 2.0
+                _gc = (int(60 - 10 * _gs), int(80 + 120 * _gs), int(220))
+            else:
+                _gs = (_gt - 0.5) * 2.0
+                _gc = (int(50 + 180 * _gs), int(200 + 10 * _gs), int(220 - 150 * _gs))
+            cv2.line(composite, (_sp_x0 + _gi, _sp_y0), (_sp_x0 + _gi, _sp_y0 + _sp_h - 1), _gc, 1)
+        cv2.putText(composite, 'spd', (_sp_x0 + _sp_w + 2, _sp_y0 + _sp_h - 1),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.2, (100, 100, 100), 1)
+
+        def _speed_to_bgr(t):
+            t = max(0.0, min(1.0, t))
+            if t <= 0.5:
+                s = t * 2.0
+                return (int(60 - 10 * s), int(80 + 120 * s), int(220))
+            s = (t - 0.5) * 2.0
+            return (int(50 + 180 * s), int(200 + 10 * s), int(220 - 150 * s))
+
+        for _rb in self.warehouse.robots:
+            _path_cells = [list(_rb.xyLocation)]
+            _rb_path = list(getattr(_rb, 'path', []))
+            if _rb_path:
+                _path_cells.extend([list(_p) for _p in _rb_path])
+            elif getattr(_rb, 'xyLocationTarget', None) and list(_rb.xyLocationTarget) != list(_rb.xyLocation):
+                _path_cells.append(list(_rb.xyLocationTarget))
+            elif getattr(_rb, 'pathTarget', None):
+                _path_cells.append(list(_rb.pathTarget))
+            elif getattr(_rb, 'actionQueue', None):
+                _path_cells.append(list(_rb.actionQueue[0][0]))
+
+            _rb_plan = list(getattr(_rb, 'pathPlan', []))
+            _rb_max_v = max(float(getattr(_rb, 'maxVelocity', 0.6)), 0.01)
+            if len(_path_cells) >= 2:
+                for _seg_i in range(len(_path_cells) - 1):
+                    _p0 = _path_cells[_seg_i]
+                    _p1 = _path_cells[_seg_i + 1]
+                    _sx0 = int(_p0[0] * _sub_sx + _sub_sx * 0.5) + _sub_ox
+                    _sy0 = int(_p0[1] * _sub_sy + _sub_sy * 0.5) + _sub_oy
+                    _sx1 = int(_p1[0] * _sub_sx + _sub_sx * 0.5) + _sub_ox
+                    _sy1 = int(_p1[1] * _sub_sy + _sub_sy * 0.5) + _sub_oy
+                    _plan_idx = _seg_i
+                    if _rb_plan and 0 <= _plan_idx < len(_rb_plan):
+                        _seg_spd = _rb_plan[_plan_idx].get('speed', _rb_max_v * 0.5)
+                    else:
+                        _seg_spd = _rb_max_v * 0.5
+                    _t = _seg_spd / _rb_max_v
+                    _seg_col = _speed_to_bgr(_t)
+                    cv2.line(composite, (_sx0, _sy0), (_sx1, _sy1), _seg_col, 1, cv2.LINE_AA)
+
+                for _mi in range(len(_rb_plan)):
+                    if _rb_plan[_mi].get('turn_deg', 0) >= 40.0:
+                        _pc = _path_cells[_mi + 1] if _mi + 1 < len(_path_cells) else None
+                        if _pc is not None:
+                            _mx = int(_pc[0] * _sub_sx + _sub_sx * 0.5) + _sub_ox
+                            _my = int(_pc[1] * _sub_sy + _sub_sy * 0.5) + _sub_oy
+                            _mt = _rb_plan[_mi].get('speed', _rb_max_v * 0.5) / _rb_max_v
+                            cv2.circle(composite, (_mx, _my), max(int(_sub_cell * 0.3), 1),
+                                       _speed_to_bgr(_mt), -1)
+
+            _cx = int(_rb.xyLocation[0] * _sub_sx + _sub_sx * 0.5) + _sub_ox
+            _cy = int(_rb.xyLocation[1] * _sub_sy + _sub_sy * 0.5) + _sub_oy
+            cv2.circle(composite, (_cx, _cy), _sub_r + 1, (0, 0, 0), -1)
+            cv2.circle(composite, (_cx, _cy), _sub_r, (220, 220, 220), -1)
+
+        # Traffic heatmap
+        if self._show_heatmap:
+            _hm_src = self.warehouse.traffic_ema
+            _hm_max = _hm_src.max()
+            if _hm_max > 0:
+                _hm_visited = _hm_src > 0
+                _hm_pct = float(np.percentile(_hm_src[_hm_visited], 98)) if _hm_visited.any() else _hm_max
+                _hm_clip = max(_hm_pct, _hm_max * 0.05)
+                _hm_norm = np.clip((_hm_src / _hm_clip) ** 1.5 * 255, 0, 255).astype(np.uint8)
+            else:
+                _hm_norm = np.zeros_like(_hm_src, dtype=np.uint8)
+            _hm_resized = cv2.resize(_hm_norm, (sw, sh), interpolation=cv2.INTER_NEAREST)
+            _hm_col = cv2.applyColorMap(_hm_resized, cv2.COLORMAP_JET)
+            _hm_zero_mask = cv2.resize(
+                (_hm_norm == 0).astype(np.uint8), (sw, sh), interpolation=cv2.INTER_NEAREST)
+            _hm_col[_hm_zero_mask > 0] = (0, 0, 0)
+            composite[sh:2*sh, mw+sw*2:mw+sw*3] = _hm_col
+
+            _slow_src = self.warehouse.traffic_total.astype(np.float32)
+            _slow_max = _slow_src.max()
+            if _slow_max > 0:
+                _slow_visited = _slow_src > 0
+                _slow_pct  = float(np.percentile(_slow_src[_slow_visited], 98)) if _slow_visited.any() else _slow_max
+                _slow_clip = max(_slow_pct, _slow_max * 0.05)
+                _slow_norm = np.clip((_slow_src / _slow_clip) ** 1.5 * 255, 0, 255).astype(np.uint8)
+                _slow_rsz  = cv2.resize(_slow_norm, (sw, sh), interpolation=cv2.INTER_NEAREST)
+                _slow_ov   = cv2.cvtColor(_slow_rsz, cv2.COLOR_GRAY2BGR)
+                _slow_zero = cv2.resize(
+                    (_slow_norm == 0).astype(np.uint8), (sw, sh), interpolation=cv2.INTER_NEAREST)
+                _slow_ov[_slow_zero > 0] = (0, 0, 0)
+                composite[sh:2*sh, mw+sw*2:mw+sw*3] = cv2.addWeighted(
+                    composite[sh:2*sh, mw+sw*2:mw+sw*3], 1.0, _slow_ov, 0.30, 0)
+
+        # Road network overlay
+        _road = self.warehouse.road_map
+        if self._show_roads and _road is not None and _road.any():
+            _road_rsz = cv2.resize(_road, (sw, sh), interpolation=cv2.INTER_NEAREST)
+            _panel = composite[sh:2*sh, mw+sw*2:mw+sw*3]
+            _road_alpha = np.zeros((sh, sw), dtype=np.float32)
+            _road_alpha[_road_rsz == 1] = 0.20
+            _road_alpha[_road_rsz == 2] = 0.30
+            _road_alpha[_road_rsz >= 3] = 0.42
+            _alpha_3ch = _road_alpha[:, :, np.newaxis]
+            _white = np.full_like(_panel, 255, dtype=np.uint8)
+            _panel[:] = np.clip(
+                _panel.astype(np.float32) * (1.0 - _alpha_3ch) + _white.astype(np.float32) * _alpha_3ch,
+                0, 255).astype(np.uint8)
+            _sx = sw / max(self.warehouse_res[0], 1)
+            _sy = sh / max(self.warehouse_res[1], 1)
+            _hs_list = self.warehouse.road_hotspots
+            _hs_top = _hs_list[0][2] if _hs_list else 1.0
+            for _hx, _hy, _hi in _hs_list:
+                _px = int(_hx * _sx + _sx * 0.5)
+                _py = int(_hy * _sy + _sy * 0.5) + sh
+                if 0 <= _px < sw and sh <= _py < 2 * sh:
+                    _ratio = _hi / max(_hs_top, 1e-9)
+                    _hcol = (0, 220, 80) if _ratio >= 0.5 else (160, 160, 0)
+                    cv2.circle(composite, (mw + sw * 2 + _px, _py), 1, _hcol, -1)
+
+        # Plaza overlay
+        _plaza = self.warehouse.plaza_map
+        if self._show_plazas and _plaza is not None and _plaza.any():
+            _plz_rsz = cv2.resize(_plaza, (sw, sh), interpolation=cv2.INTER_NEAREST)
+            _panel = composite[sh:2*sh, mw+sw*2:mw+sw*3]
+            _plz_mask = _plz_rsz > 0
+            _plz_tint = np.array([180, 140, 60], dtype=np.float32)
+            _plz_alpha = 0.25
+            _panel[_plz_mask] = np.clip(
+                _panel[_plz_mask].astype(np.float32) * (1.0 - _plz_alpha)
+                + _plz_tint * _plz_alpha,
+                0, 255).astype(np.uint8)
+
+        # Package targets sub-view
+        sub_scale = sw // self.warehouse_res[0]
+        pkg_tgt_img = np.zeros((sh, sw, 3), dtype=np.uint8)
+        Draw_Warehouse.draw_package_arrows(pkg_tgt_img, self.warehouse.packages, sub_scale)
+        tgt_resized = cv2.resize((self.warehouse.packageTargetsInWarehouse * 255).astype(np.uint8),
+                                  (sw, sh), interpolation=cv2.INTER_NEAREST)
+        pkg_tgt_img[tgt_resized > 0] = (255, 255, 255)
+        composite[sh:2*sh, mw+sw:mw+2*sw] = pkg_tgt_img
+
+    def _sample_chart_histories(self):
+        """Sample rolling chart histories once per second (wall-clock)."""
+        if time.time() - self._hist_last_sample < 1.0:
+            return
+        self._hist_last_sample = time.time()
+        wh = self.warehouse
+        overdue = sum(1 for p in wh.packages if p.timeToDeadline.total_seconds() < 0)
+        self._late_total += overdue
+        mean_batt = float(np.mean([r.batteryPercent for r in wh.robots])) if wh.robots else 0.0
+        charging    = sum(1 for r in wh.robots if r.status == "charging")
+        idle_count  = sum(1 for r in wh.robots if r.status == "idle")
+        working     = len(wh.robots) - charging - idle_count
+        self._hist_imported = np.roll(self._hist_imported, -1); self._hist_imported[-1] = wh.packagesRollingCount
+        self._hist_exported = np.roll(self._hist_exported, -1); self._hist_exported[-1] = wh.packageExportRollingCount
+        self._hist_overdue  = np.roll(self._hist_overdue,  -1); self._hist_overdue[-1]  = overdue
+        self._hist_late     = np.roll(self._hist_late,     -1); self._hist_late[-1]     = self._late_total
+        self._hist_batt         = np.roll(self._hist_batt,         -1); self._hist_batt[-1]         = mean_batt
+        self._hist_robots       = np.roll(self._hist_robots,       -1); self._hist_robots[-1]       = len(wh.robots)
+        self._hist_working      = np.roll(self._hist_working,      -1); self._hist_working[-1]      = working
+        self._hist_charging     = np.roll(self._hist_charging,     -1); self._hist_charging[-1]     = charging
+        self._hist_idle         = np.roll(self._hist_idle,         -1); self._hist_idle[-1]         = idle_count
+        self._hist_import_cap   = np.roll(self._hist_import_cap,   -1); self._hist_import_cap[-1]   = getattr(wh, '_flow_import_cap', wh.packagesMaxQuantity)
+        self._hist_throughput   = np.roll(self._hist_throughput,   -1); self._hist_throughput[-1]   = getattr(wh, '_flow_throughput', 0) * 60
+        self._hist_delivery     = np.roll(self._hist_delivery,     -1); self._hist_delivery[-1]     = getattr(wh, '_flow_avg_delivery', 0)
+        n_pkgs = max(len(wh.packages), 1)
+        self._hist_overdue_pct  = np.roll(self._hist_overdue_pct,  -1); self._hist_overdue_pct[-1]  = overdue / n_pkgs * 100
+        self._hist_count    = min(self._hist_count + 1, len(self._hist_exported))
+        cur = {
+            "loops":    wh.warehouseLoopCount,
+            "export":   wh.packageExportRollingCount,
+            "pkgs":     wh.packagesInWarehouseCount,
+            "robots":   len(wh.robots),
+            "import":   wh.packagesInImportCount,
+            "storage":  wh.packagesInStorageCount,
+            "expzone":  wh.packagesInExportCount,
+            "overdue":  overdue,
+            "tot_imp":  wh.packagesRollingCount,
+            "tot_late": self._late_total,
+            "batt":     mean_batt,
+            "working":  working,
+            "chging":   charging,
+            "idle":     idle_count,
+        }
+        if self._prev_stats is not None:
+            self._rate_stats = {k: cur[k] - self._prev_stats.get(k, cur[k]) for k in cur}
+        self._prev_stats = cur
 
     def _draw_charts(self, canvas, y_off, ch, cw):
         """Render four side-by-side charts into canvas starting at row y_off."""
@@ -1974,16 +1937,50 @@ class MainGame:
     def gameEnd(self):
         self.exit = True
 
+def _shutdown(reason=''):
+    """Best-effort teardown of OpenCV windows and logging handlers.
+
+    Called from the main entrypoint's ``finally`` so the process exits
+    cleanly even when the game loop raises an unhandled exception.
+    """
+    try:
+        cv2.destroyAllWindows()
+        # Drain any pending GUI events so the OS reclaims the window handle.
+        for _ in range(4):
+            cv2.waitKey(1)
+    except Exception:
+        pass
+    try:
+        for _h in list(logging.getLogger().handlers):
+            try:
+                _h.flush()
+                _h.close()
+            except Exception:
+                pass
+            logging.getLogger().removeHandler(_h)
+    except Exception:
+        pass
+    if reason:
+        print('-- Shutdown:', reason, '--')
+
+
 if __name__ == '__main__':
 
-    mainGame = MainGame()
+    mainGame = None
     loop_count = 0
-
     print('-- Game Loop Start --')
-    while not mainGame.exit:
-        mainGame.gameLoop(loop_count)
-        loop_count += 1
-    print('-- Game Loop End --')
-
-    time.sleep(2)
-    cv2.destroyAllWindows()
+    try:
+        mainGame = MainGame()
+        while not mainGame.exit:
+            mainGame.gameLoop(loop_count)
+            loop_count += 1
+        print('-- Game Loop End --')
+        time.sleep(2)
+    except KeyboardInterrupt:
+        print('-- Game Loop Interrupted --')
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        _shutdown()

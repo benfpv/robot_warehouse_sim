@@ -14,15 +14,9 @@ Mutations go through ``wh.pending_zone_changes`` so the existing
 import time
 import numpy as np
 
-# Zone constants (must match warehouse.py / paint_handler.py)
-ZONE_NONE    = 0
-ZONE_IMPORT  = 1
-ZONE_STORAGE = 2
-ZONE_EXPORT  = 3
+from data.constants import ZONE_NONE, ZONE_IMPORT, ZONE_STORAGE, ZONE_EXPORT
 
 _ZONE_IDS   = (ZONE_IMPORT, ZONE_STORAGE, ZONE_EXPORT)
-_ZONE_NAMES = {ZONE_NONE: 'neutral', ZONE_IMPORT: 'import',
-               ZONE_STORAGE: 'storage', ZONE_EXPORT: 'export'}
 # Short abbreviations used in the UI stats line where space is tight
 _ZONE_ABBR  = {ZONE_NONE: 'clr', ZONE_IMPORT: 'imp',
                ZONE_STORAGE: 'sto', ZONE_EXPORT: 'exp'}

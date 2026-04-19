@@ -58,7 +58,7 @@ class Robot:
         self.actionQueue = actionQueue
         self.colour = colour
         self.area = area
-        self.xyLocation = xyLocation
+        self.xyLocation = list(xyLocation)
         self.areaTarget = areaTarget
         self.xyLocationTarget = xyLocationTarget
         self.xyLocationDiff = xyLocationDiff
@@ -94,6 +94,7 @@ class Robot:
         self.hasCharged = False
         self.hasCarried = False
         self.decommissioning = False
+        self._pending_removal = False
         self.birthLocation = xyLocation.copy()
 
 class Robot_Log:
