@@ -74,33 +74,11 @@ class Warehouse:
         return self.warehouseLoopCount / SIM_TICK_RATE
 
     def __init__(self,
-                    # Window Resolution, Window Center
-                    windowRes = None, windowBackgroundColour = None, windowCenter = None, windowArray = None, itemsList = None, addressesList = None,
-                    # Warehouse
-                    warehouseLoopCount = 0, datetimeNow = None, timeStart = None, timeElapsed = 0, warehouseWindowRes = None, warehouseBackgroundColour = None, warehouseWindowCenter = None, warehouseWindowArray = None, warehousePerimeterCoordinates = None,
-                    colourOfImportAreas = (10,30,10), colourOfStorageAreas = (30,10,10), colourOfExportAreas = (10,10,30),
-                    logsMaxLength = 10000, dataMaxLength = 200, warehouse_data = None,
-                    # Space Availability
-                    packagesInImportCount = 0, packagesInStorageCount = 0, packagesInExportCount = 0, packagesInWarehouseCount = 0,
-                    packagesPlannedInImportCount = 0, packagesPlannedInStorageCount = 0, packagesPlannedInExportCount = 0,
-                    importSpaceAvailable = True, storageSpaceAvailable = True, exportSpaceAvailable = True,
-                    packageExportCount = 0, packageExportRollingCount = 0,
-                    # Packages
-                    packageDimensionsLimit = 1, packagesActionsList = None,
-                    packages = None, packagesLog = None, packagesMaxQuantity = 2000,
-                    packagesMoveList = None, packagesMaxMoveQuantity = 120, packagesRollingCount = 0,
-                    packagesInWarehouse = None, packageTargetsInWarehouse = None,
-                    # Robots
-                    packagesMovingList = None, robotsActionsList = None,
-                    robots = None, robotsLog = None, robotsInWarehouse = None, robotsMaxQuantity = 60, robotsRollingCount = 0, robotsInWarehouseCount = 0,
-                    robotsTaskAssignmentList = None, robotsTaskAssignmentStyle = 0, robotsTaskAssignmentMaxQuantity = 1,
-                    numRobotsIdle = 0, numRobotsMoving = 0, numRobotsCharging = 0,
-                    # Charging station(s)
-                    chargersActionsList = None,
-                    chargers = None, chargersMaxQuantity = 10, chargersInWarehouse = None, chargersRollingCount = 0,
-                    # Spawn maps (list of [x,y] coords; None = use default perimeter)
-                    chargerSpawnMap = None, robotSpawnMap = None,
-                    _debug_invariants = False
+                    windowRes=None, windowBackgroundColour=None, windowCenter=None,
+                    windowArray=None, itemsList=None, addressesList=None,
+                    robotsMaxQuantity=60, chargersMaxQuantity=10,
+                    logsMaxLength=10000, packagesLog=None, robotsLog=None,
+                    _debug_invariants=False,
                 ) -> None:
         print("--- Warehouse Init ---")
         # Window Resolution, Window Center
@@ -110,75 +88,78 @@ class Warehouse:
         self.windowArray = windowArray if windowArray is not None else []
         self.itemsList = itemsList if itemsList is not None else []
         self.addressesList = addressesList if addressesList is not None else []
-        # Warehouse
-        self.warehouseLoopCount = warehouseLoopCount
-        self.datetimeNow = datetimeNow if datetimeNow is not None else datetime.now()
-        self.timeStart = timeStart if timeStart is not None else time.time()
-        self.timeElapsed = timeElapsed
-        self.warehouseBackgroundColour = warehouseBackgroundColour if warehouseBackgroundColour is not None else []
-        self.warehouseWindowRes = warehouseWindowRes if warehouseWindowRes is not None else []
-        self.warehouseWindowCenter = warehouseWindowCenter if warehouseWindowCenter is not None else []
-        self.warehouseWindowArray = warehouseWindowArray if warehouseWindowArray is not None else []
-        self.warehousePerimeterCoordinates = warehousePerimeterCoordinates if warehousePerimeterCoordinates is not None else []
+        # Warehouse timing
+        self.warehouseLoopCount = 0
+        self.datetimeNow = datetime.now()
+        self.timeStart = time.time()
+        self.timeElapsed = 0
+        self.warehouseBackgroundColour = []
+        self.warehouseWindowRes = []
+        self.warehouseWindowCenter = []
+        self.warehouseWindowArray = []
+        self.warehousePerimeterCoordinates = []
         self.logsMaxLength = logsMaxLength
-        self.dataMaxLength = dataMaxLength
-        self.warehouse_data = warehouse_data if warehouse_data is not None else []
+        self.dataMaxLength = 200
+        self.warehouse_data = []
         # Zone colours
-        self.colourOfImportAreas = colourOfImportAreas
-        self.colourOfStorageAreas = colourOfStorageAreas
-        self.colourOfExportAreas = colourOfExportAreas
+        self.colourOfImportAreas = (10, 30, 10)
+        self.colourOfStorageAreas = (30, 10, 10)
+        self.colourOfExportAreas = (10, 10, 30)
         # Areas Count and Availability
-        self.packagesInImportCount = packagesInImportCount
-        self.packagesInStorageCount = packagesInStorageCount
-        self.packagesInExportCount = packagesInExportCount
-        self.packagesInWarehouseCount = packagesInWarehouseCount
-        self.packagesPlannedInImportCount = packagesPlannedInImportCount
-        self.packagesPlannedInStorageCount = packagesPlannedInStorageCount
-        self.packagesPlannedInExportCount = packagesPlannedInExportCount
-        self.importSpaceAvailable = importSpaceAvailable
-        self.storageSpaceAvailable = storageSpaceAvailable
-        self.exportSpaceAvailable = exportSpaceAvailable
+        self.packagesInImportCount = 0
+        self.packagesInStorageCount = 0
+        self.packagesInExportCount = 0
+        self.packagesInWarehouseCount = 0
+        self.packagesPlannedInImportCount = 0
+        self.packagesPlannedInStorageCount = 0
+        self.packagesPlannedInExportCount = 0
+        self.importSpaceAvailable = True
+        self.storageSpaceAvailable = True
+        self.exportSpaceAvailable = True
         # Package Export
-        self.packageExportCount = packageExportCount
-        self.packageExportRollingCount = packageExportRollingCount
+        self.packageExportCount = 0
+        self.packageExportRollingCount = 0
         # Packages
-        self.packageDimensionsLimit = packageDimensionsLimit
-        self.packagesActionsList = packagesActionsList if packagesActionsList is not None else ["idle", "carried"]
-        self.packages = packages if packages is not None else []
+        self.packageDimensionsLimit = 1
+        self.packagesActionsList = ["idle", "carried"]
+        self.packages = []
         # Bounded ring buffer — auto-trims to logsMaxLength so long runs don't thrash the allocator.
-        # Coerce to deque even when caller passes a plain list (e.g. save/load).
+        # Coerce to deque when caller passes a plain list (e.g. log-replay in tests).
         self.packagesLog = deque(packagesLog, maxlen=logsMaxLength) if packagesLog is not None else deque(maxlen=logsMaxLength)
-        self.packagesMaxQuantity = packagesMaxQuantity
-        self.packagesMoveList = packagesMoveList if packagesMoveList is not None else []
-        self.packagesMaxMoveQuantity = packagesMaxMoveQuantity
-        self.packagesRollingCount = packagesRollingCount
-        self.packagesInWarehouse = packagesInWarehouse if packagesInWarehouse is not None else []
-        self.packageTargetsInWarehouse = packageTargetsInWarehouse if packageTargetsInWarehouse is not None else []
+        self.packagesMaxQuantity = 2000
+        self.packagesMoveList = []
+        self.packagesMaxMoveQuantity = 120
+        self.packagesRollingCount = 0
+        self.packagesInWarehouse = []
+        self.packageTargetsInWarehouse = []
         # Robots
-        self.packagesMovingList = packagesMovingList if packagesMovingList is not None else []
+        self.packagesMovingList = []
         self.packagesReorgList = []          # pkg numbers needing priority re-scheduling after a zone change
         self.pending_zone_changes = set()    # (gx,gy) cells painted this tick, consumed by reconcile
-        self.robotsActionsList = robotsActionsList if robotsActionsList is not None else ["none", "idle", "charging", "move to charging station", "move to target pickup location", "move to target dropoff location", "pickup target package", "dropoff target package", "move to exit", "move to idle"]
-        self.robots = robots if robots is not None else []
+        self.robotsActionsList = ["none", "idle", "charging", "move to charging station",
+                                  "move to target pickup location", "move to target dropoff location",
+                                  "pickup target package", "dropoff target package",
+                                  "move to exit", "move to idle"]
+        self.robots = []
         # Bounded ring buffer — see packagesLog above.
         self.robotsLog = deque(robotsLog, maxlen=logsMaxLength) if robotsLog is not None else deque(maxlen=logsMaxLength)
-        self.robotsInWarehouse = robotsInWarehouse if robotsInWarehouse is not None else []
+        self.robotsInWarehouse = []
         self.robotsMaxQuantity = robotsMaxQuantity
         self._robot_target_count = robotsMaxQuantity
-        self.robotsRollingCount = robotsRollingCount
-        self.robotsInWarehouseCount = robotsInWarehouseCount
-        self.robotsTaskAssignmentList = robotsTaskAssignmentList if robotsTaskAssignmentList is not None else []
-        self.robotsTaskAssignmentStyle = robotsTaskAssignmentStyle
-        self.robotsTaskAssignmentMaxQuantity = robotsTaskAssignmentMaxQuantity
+        self.robotsRollingCount = 0
+        self.robotsInWarehouseCount = 0
+        self.robotsTaskAssignmentList = []
+        self.robotsTaskAssignmentStyle = 0
+        self.robotsTaskAssignmentMaxQuantity = 1
         # Charging Stations
-        self.chargersActionsList = chargersActionsList if chargersActionsList is not None else ["none", "idle", "charging planned", "charging"]
-        self.chargers = chargers if chargers is not None else []
+        self.chargersActionsList = ["none", "idle", "charging planned", "charging"]
+        self.chargers = []
         self.chargersMaxQuantity = chargersMaxQuantity
-        self.chargersInWarehouse = chargersInWarehouse if chargersInWarehouse is not None else []
-        self.chargersRollingCount = chargersRollingCount
+        self.chargersInWarehouse = []
+        self.chargersRollingCount = 0
         # Spawn maps (None = use default perimeter coords, set after perimeter init)
-        self._chargerSpawnMap_override = chargerSpawnMap
-        self._robotSpawnMap_override   = robotSpawnMap
+        self._chargerSpawnMap_override = None
+        self._robotSpawnMap_override   = None
         self._debug_invariants = _debug_invariants
         
         # Init Warehouse Screen
@@ -652,16 +633,16 @@ class Warehouse:
         self.reconcile_zone_changes() # Process user-painted cells; partial-flush affected plans
         self.invalidate_stale_targets() # Cancel in-flight moves whose targets no longer match zoneMap
         self.recount_planned() # Authoritative recount of planned counts
-        self.packages, self.packagesRollingCount, self.packagesInWarehouseCount, self.packagesLog, self.packageTargetsInWarehouse, self.packageExportCount, self.packageExportRollingCount = self.update_packages() # Update packages
-        self.chargers, self.chargersRollingCount, self.chargersInWarehouse = self.update_chargers()
-        self.packages, self.packagesMoveList, self.packagesMovingList, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount, self.robots, self.robotsRollingCount, self.robotsTaskAssignmentList, self.robotsLog, self.chargers = self.update_robots() # Update robots
-        self.packages = self.update_carried_packages()
-        self.packages, self.packagesInImportCount, self.packagesInStorageCount, self.packagesInExportCount = self.update_packages_areas()
-        self.packagesInWarehouse = self.update_packages_in_warehouse() # Update warehouse knowledge of packages
-        self.chargersInWarehouse = self.update_chargers_in_warehouse()
-        self.robotsInWarehouse = self.update_robots_in_warehouse()
-        self.importSpaceAvailable, self.storageSpaceAvailable, self.exportSpaceAvailable = self.update_space_available()
-        self.packagesLog, self.robotsLog = self.trim_logs()
+        self.update_packages()                   # Update packages
+        self.update_chargers()
+        self.update_robots()                      # Update robots
+        self.update_carried_packages()
+        self.update_packages_areas()
+        self.update_packages_in_warehouse()       # Update warehouse knowledge of packages
+        self.update_chargers_in_warehouse()
+        self.update_robots_in_warehouse()
+        self.update_space_available()
+        self.trim_logs()
         self.record_warehouse_data()
         # ── Periodic summary log (~every 5 sec at 40 tps) ──
         if self.warehouseLoopCount % 200 == 0:

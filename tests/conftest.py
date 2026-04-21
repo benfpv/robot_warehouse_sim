@@ -126,6 +126,11 @@ class WarehouseStub:
         self.packagesMaxQuantity = 60
         self.packagesMaxMoveQuantity = 16
         self._flow_pipeline_depth = 3.0
+        self._flow_import_cap = 0
+        self._flow_avg_deadline = 0.0
+        self._flow_avg_delivery = 0.0
+        self._flow_ema_alpha = 0.02
+        self.pending_zone_changes = set()
 
         # Battery/charging policy
         self._power_policy_mode = 'balanced'
@@ -214,6 +219,8 @@ for _method_name in (
     'update_robots_in_warehouse',
     'update_chargers_in_warehouse',
     'recount_planned',
+    'update_flow_control',
+    'reconcile_zone_changes',
 ):
     _attr = _RealWarehouse.__dict__.get(_method_name)
     if _attr is not None:
