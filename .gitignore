@@ -33,3 +33,9 @@ build/
 # Logs / output
 *.log
 *.log.*
+
+# Test / coverage output
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
