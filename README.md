@@ -106,13 +106,22 @@ python main.py
 
 Press **Ctrl-C** in the terminal to exit (the window is borderless/frameless — there is no close button by default).
 
+## Development Checks
+
+```bash
+python -m pytest -q
+python -m pytest tests/test_gamedraw_snapshot.py -q
+```
+
+The snapshot tests guard the OpenCV dashboard render output. Before making a manual zip/archive, preview ignored generated files with `git clean -ndX`; if the preview only contains caches/logs you do not need, `git clean -fdX` removes them.
+
 ---
 
 ## Configuration
 
-All key parameters live in two places:
+All key parameters live in a few focused places:
 
-**`main.py` — `MainGame.__init__`**
+**`main.py` — `MainGame._init_constants()` / `_init_warehouse()`**
 
 | Parameter | Default | Effect |
 |-----------|---------|--------|
@@ -120,8 +129,14 @@ All key parameters live in two places:
 | `warehouse_windowRes` | `(320, 280)` | Display size of main view (4× upscale) |
 | `sim_frametime` | `1/40` | Simulation tick rate (s) |
 | `draw_frametime` | `1/15` | Display repaint rate (s) |
-| `panel_h` | `165` | Info panel height (px) |
-| `chart_h` | `95` | Chart strip height (px) |
+| `robotsMaxQuantity` | `18` | Initial app fleet target passed to `Warehouse` |
+
+**`data/ui/layout.py` — `PanelGeometry`**
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `panel_h` | `255` | Info panel height (px) |
+| `chart_h` | `145` | Chart strip height (px) |
 
 **`data/warehouse/warehouse.py` — `Warehouse.__init__`**
 
@@ -130,7 +145,7 @@ All key parameters live in two places:
 | `robotsMaxQuantity` | `60` | Max robots in simulation |
 | `chargersMaxQuantity` | `10` | Max charging stations |
 | `packagesMaxMoveQuantity` | `120` | Max packages in the delivery pipeline at once |
-| `robotsTaskAssignmentMaxQuantity` | `3` | Max queued tasks per robot |
+| `robotsTaskAssignmentMaxQuantity` | `1` | Max active package assignment per robot; each assignment still expands into multiple movement/action queue entries |
 | `_pkg_target_mode` | `nearest` | Target placement mode inside a destination zone (`random`, `nearest`, `zone_edge`) |
 | `_power_policy_mode` | `balanced` | Power policy profile (`eco`, `balanced`, `performance`) |
 | `_flow_pipeline_depth` | `4` | Packages per robot in the delivery pipeline (adjusted by flow policy) |
@@ -152,15 +167,15 @@ The active mode also appears in the `SIM STATS` panel as `target:`, with a short
 Three strategy groups are now UI-selectable directly from the dashboard:
 
 - **Power Policy** (`CHARGERS` header): `ECO`, `BAL`, `PERF`
-- `ECO`: larger battery buffers and earlier charging
-- `BAL`: default profile
-- `PERF`: lower buffers for higher utilization
+  - `ECO`: larger battery buffers and earlier charging
+  - `BAL`: default profile
+  - `PERF`: lower buffers for higher utilization
 - **Flow Policy** (`SIM STATS` header): `STDY`, `BAL`, `THRU`
   - `STDY`: lower pipeline depth (3 pkg/bot) for stability
   - `BAL`: default pipeline depth (4 pkg/bot)
   - `THRU`: higher pipeline depth (6 pkg/bot) for throughput
 - **Package Target Mode** (`PACKAGES` header): `RND`, `NEAR`, `EDGE`
-- Controls placement strategy inside the destination zone
+  - Controls placement strategy inside the destination zone
 - **Robot Count** (`ROBOTS` header): `[−]`, `[+]`
   - `[−]`: decommission one robot (finishes tasks, returns to birth location, exits)
   - `[+]`: spawn one new robot on the perimeter
@@ -171,16 +186,25 @@ Three strategy groups are now UI-selectable directly from the dashboard:
 
 ```
 robot_warehouse_sim/
-├── main.py                          # Entry point, MainGame, composite display, charts
+├── main.py                          # Entry point, MainGame coordinator, composite display loop
 ├── cvplt.py                         # Minimal OpenCV line-plot utility
 ├── requirements.txt
+├── pyproject.toml                   # Pytest configuration
+├── run.bat                          # Windows convenience launcher
 ├── resources/
 │   ├── list_items.csv               # Item catalogue loaded at startup
 │   ├── list_addresses.csv           # Address list for package origin/destination
 │   ├── zone_map.png                 # (auto-generated) zone layout loaded at startup
+│   ├── zone_map_default.png         # Default generated zone layout
+│   ├── zone_map_example.png         # Paint/import example image
+│   ├── zone_map_round.png           # Alternative round/organic zone layout
 │   ├── charger_map.png              # (optional) custom charger spawn positions
-│   └── robot_map.png                # (optional) custom robot spawn positions
+│   ├── charger_map_default.png      # Default charger spawn map
+│   ├── charger_map_example.png      # Charger map example image
+│   ├── robot_map.png                # (optional) custom robot spawn positions
+│   └── robot_map_example.png        # Robot map example image
 └── data/
+    ├── constants.py                 # Shared simulation constants and zone IDs
     ├── functions.py                 # General utility functions (grid, perimeter, cardinal)
     ├── functions_timeseries.py      # Rolling array helpers
     ├── importer.py                  # CSV → Item / Address object loaders
@@ -195,6 +219,12 @@ robot_warehouse_sim/
     │   ├── map_importer.py          # PNG zone/spawn map loader and example generators
     │   ├── zone_strategy.py         # Adaptive zone rebalancing (zone-swap only)
     │   └── warehouse_optimizer.py   # Strategy orchestrator (tick budget, strategy dispatch)
+    ├── ui/
+    │   ├── formatters.py            # Pure display formatting helpers
+    │   ├── info_panel.py            # Four-column info-panel renderer
+    │   ├── layout.py                # Composite geometry and button layout helpers
+    │   ├── presenter.py             # Fleet/dashboard view-model helpers
+    │   └── styles.py                # Dashboard button/style dictionaries
     └── warehouse/
         ├── warehouse.py             # Core simulation engine — tick loop, flow control, scheduling
         ├── warehouse_init.py        # Grid / zone / lane map initialisation
@@ -285,7 +315,7 @@ A Physarum-inspired organic road builder runs periodically (gated on all robots 
 - Per-robot cost model (purchase, energy, maintenance).
 - Movement type/style simulation: wheeled, legged, aerial.
 - Individual robot navigation and sensory/vision system simulation.
-- Dynamic task-priority counts per robot (currently fixed at 3).
+- Dynamic task-priority counts per robot (currently one active package assignment per robot, expanded into multi-step action queues).
 - AI / LLM / VLM-based individual robot decision-making.
 
 ### Package Characteristics
@@ -299,6 +329,10 @@ A Physarum-inspired organic road builder runs periodically (gated on all robots 
 - Dynamic upsizing and downsizing of the warehouse footprint.
 - Renovation and construction events (temporary zone closures, new sections).
 - Destruction/incident simulation and recovery.
+
+### Dynamic Zones & Mobile Infrastructure
+- **Moving zones** — dynamically repositionable import/storage/export zones (e.g., robots loading packages onto moving trucks or mobile flatbeds). Zones that move bring their contents along; this requires entity-level tracking of which packages belong to which zone and logic to update zone membership dynamically.
+- **New mobile entity types** — trucks, flatbeds, or other container vehicles that can assume import/storage/export zone roles and carry packages as they move. Zone-to-entity binding and collision avoidance between mobile zones and stationary infrastructure.
 
 ### Interfaces & Display
 - Dark mode, light mode, and high-contrast accessibility modes.

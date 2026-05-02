@@ -1,6 +1,6 @@
 import numpy as np
 
-from data.functions import *
+from data.functions import Functions
 
 
 class Warehouse_Init:

@@ -1,8 +1,8 @@
 import logging
 import random
-import time
 
-from data.warehouse.charger import *
+from data.warehouse.charger import Charger
+from data.warehouse.robot_functions import try_spawn_location
 
 _log = logging.getLogger(__name__)
 
@@ -31,20 +31,7 @@ class Charger_Functions:
 
         Returns [x, y] on success or [] if no free cell was found.
         """
-        loc_count = 0
-        # Generate candidate coordinate (n tries)
-        while loc_count < 3:
-            randIndex = random.randint(0, len(chargerLocationsAvailableMap)-1)
-            candidateCoordinate = chargerLocationsAvailableMap[randIndex]
-            x = candidateCoordinate[0]
-            y = candidateCoordinate[1]
-            if (chargersInWarehouse[y][x] == 0 and packagesInWarehouse[y][x] == 0):
-                xyLocation = [x, y]
-                break
-            loc_count += 1
-        if loc_count >= 3:
-            return []
-        return xyLocation
+        return try_spawn_location(chargerLocationsAvailableMap, chargersInWarehouse, packagesInWarehouse)
     
     @staticmethod
     def generate_charger(xyLocationSpawn, chargersRollingCount):
@@ -52,7 +39,8 @@ class Charger_Functions:
         chargerNumber = chargersRollingCount
         colour = (50, 190, 230)
         area = 'neutral'
-        xyLocation = xyLocationSpawn
+        # Copy to avoid aliasing the caller's spawn-location list (matches Robot_Functions.generate_robot).
+        xyLocation = list(xyLocationSpawn)
         status = 'idle'
         charger = Charger(chargerNumber, colour, area, xyLocation, status)
         return charger

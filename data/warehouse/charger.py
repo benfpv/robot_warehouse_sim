@@ -1,5 +1,5 @@
 """Charger data class for stationary charging stations."""
-from datetime import date, datetime
+from datetime import datetime
 
 class Charger:
     """A stationary charging station.
@@ -15,7 +15,7 @@ class Charger:
         self.chargerNumber = chargerNumber
         self.colour = colour
         self.area = area
-        self.xyLocation = xyLocation
+        self.xyLocation = list(xyLocation)
         self.status = status
 
 class Charger_Log:

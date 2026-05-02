@@ -2,14 +2,9 @@ import random
 from datetime import datetime, timedelta
 import numpy as np
 
-from data.warehouse.warehouse_log import *
-from data.warehouse.package import *
-
-# Zone constants (must match warehouse.py)
-ZONE_NONE = 0
-ZONE_IMPORT = 1
-ZONE_STORAGE = 2
-ZONE_EXPORT = 3
+from data.warehouse.warehouse_log import Packages_Log
+from data.warehouse.package import Package
+from data.constants import ZONE_NONE, ZONE_IMPORT, ZONE_STORAGE, ZONE_EXPORT, ZONE_NAMES
 
 
 class Package_Functions:
@@ -20,8 +15,7 @@ class Package_Functions:
         if packagesInWarehouseCount < packagesMaxQuantity:
             movePackage, xyLocation = self.try_packageTargetLocation(zoneMap, spawnZoneId, packagesInWarehouse, packageTargetsInWarehouse, chargersInWarehouse)
             if (movePackage == True):
-                zoneNames = {ZONE_IMPORT: 'import', ZONE_STORAGE: 'storage', ZONE_EXPORT: 'export'}
-                spawnArea = zoneNames.get(spawnZoneId, 'neutral')
+                spawnArea = ZONE_NAMES.get(spawnZoneId, 'neutral')
                 package = self.generate_package(xyLocation, itemsList, addressesList, packagesRollingCount, area=spawnArea)
                 packages.append(package)
                 packagesLog.append(Packages_Log(packagesRollingCount, package, 'import', datetimeNow))

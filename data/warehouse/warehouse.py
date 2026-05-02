@@ -1,5 +1,5 @@
 """Core warehouse simulation engine — tick loop, flow control, scheduling, and pathfinding."""
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 import math
 import random
 import logging
@@ -8,29 +8,28 @@ import numpy as np
 import cv2 
 import time
 
-from data.functions import *
-from data.functions_timeseries import *
-from data.warehouse.warehouse_init import *
-from data.warehouse.package import *
-from data.warehouse.package_functions import *
-from data.warehouse.charger import *
-from data.warehouse.charger_functions import *
-from data.warehouse.robot import *
-from data.warehouse.robot_functions import *
+from data.functions import Functions
+from data.functions_timeseries import Timeseries_Functions
+from data.warehouse.warehouse_init import Warehouse_Init
+from data.warehouse.package import Package
+from data.warehouse.package_functions import Package_Functions
+from data.warehouse.charger import Charger
+from data.warehouse.charger_functions import Charger_Functions
+from data.warehouse.robot import Robot, Robot_Log
+from data.warehouse.robot_functions import Robot_Functions
 from data.warehouse.pathfinder import AStarPathfinder
 from data.warehouse.road_builder import RoadBuildJob
-from data.warehouse.warehouse_data import *
-
-ZONE_NONE = 0
-ZONE_IMPORT = 1
-ZONE_STORAGE = 2
-ZONE_EXPORT = 3
+from data.warehouse.warehouse_data import Warehouse_Data
+from data.warehouse.warehouse_log import Robots_Log
+from data.constants import (ZONE_NONE, ZONE_IMPORT, ZONE_STORAGE, ZONE_EXPORT,
+                            ZONE_NAMES, SIM_TICK_RATE, STALL_TICKS,
+                            ROBOT_CARRY_SPEED_PENALTY, BATTERY_FULL_PCT)
 
 # ── Module-level logger ────────────────────────────────────────────────
 _log = logging.getLogger('warehouse')
 if not _log.handlers:
     _log.setLevel(logging.DEBUG)
-    _fh = logging.FileHandler('warehouse.log', mode='w', encoding='utf-8')
+    _fh = logging.FileHandler('warehouse.log', mode='a', encoding='utf-8')
     _fh.setLevel(logging.DEBUG)
     _fh.setFormatter(logging.Formatter('%(asctime)s  %(levelname)-5s  %(message)s', datefmt='%H:%M:%S'))
     _log.addHandler(_fh)
@@ -69,108 +68,99 @@ class Warehouse:
     _FLOW_POLICY_MODES = ('steady', 'balanced', 'throughput')
     _PKG_TARGET_MODES = ('random', 'nearest', 'zone_edge')
 
+    @property
+    def _sim_time(self):
+        """Current simulation time in seconds (tick-based, deterministic)."""
+        return self.warehouseLoopCount / SIM_TICK_RATE
+
     def __init__(self,
-                    # Window Resolution, Window Center
-                    windowRes = [], windowBackgroundColour = [], windowCenter = [], windowArray = [], itemsList = [], addressesList = [],
-                    # Warehouse
-                    warehouseLoopCount = 0, datetimeNow = datetime.now(), timeStart = time.time(), timeElapsed = 0, warehouseWindowRes = [], warehouseBackgroundColour = [], warehouseWindowCenter = [], warehouseWindowArray = [], warehousePerimeterCoordinates = [],
-                    colourOfImportAreas = (10,30,10), colourOfStorageAreas = (30,10,10), colourOfExportAreas = (10,10,30),
-                    logsMaxLength = 10000, dataMaxLength = 200, warehouse_data = [],
-                    # Space Availability
-                    packagesInImportCount = 0, packagesInStorageCount = 0, packagesInExportCount = 0, packagesInWarehouseCount = 0,
-                    packagesPlannedInImportCount = 0, packagesPlannedInStorageCount = 0, packagesPlannedInExportCount = 0,
-                    importSpaceAvailable = True, storageSpaceAvailable = True, exportSpaceAvailable = True,
-                    packageExportCount = 0, packageExportRollingCount = 0,
-                    # Packages
-                    packageDimensionsLimit = 1, packagesActionsList = ["idle", "carried"],
-                    packages = [], packagesLog = [], packagesMaxQuantity = 2000,
-                    packagesMoveList = [], packagesMaxMoveQuantity = 120, packagesRollingCount = 0,
-                    packagesInWarehouse = [], packageTargetsInWarehouse = [],
-                    # Robots
-                    packagesMovingList = [], robotsActionsList = ["none", "idle", "charging", "move to charging station", "move to target pickup location", "move to target dropoff location", "pickup target package", "dropoff target package", "move to exit", "move to idle"],
-                    robots = [], robotsLog = [], robotsInWarehouse = [], robotsMaxQuantity = 60, robotsRollingCount = 0, robotsInWarehouseCount = 0,
-                    robotsTaskAssignmentList = [], robotsTaskAssignmentStyle = 0, robotsTaskAssignmentMaxQuantity = 1,
-                    numRobotsIdle = 0, numRobotsMoving = 0, numRobotsCharging = 0,
-                    # Charging station(s)
-                    chargersActionsList = ["none", "idle", "charging planned", "charging"], 
-                    chargers = [], chargersMaxQuantity = 10, chargersInWarehouse = [], chargersRollingCount = 0,
-                    # Spawn maps (list of [x,y] coords; None = use default perimeter)
-                    chargerSpawnMap = None, robotSpawnMap = None
+                    windowRes=None, windowBackgroundColour=None, windowCenter=None,
+                    windowArray=None, itemsList=None, addressesList=None,
+                    robotsMaxQuantity=60, chargersMaxQuantity=10,
+                    logsMaxLength=10000, packagesLog=None, robotsLog=None,
+                    _debug_invariants=False,
                 ) -> None:
         print("--- Warehouse Init ---")
         # Window Resolution, Window Center
-        self.windowRes = windowRes
-        self.windowBackgroundColour = windowBackgroundColour
-        self.windowCenter = windowCenter
-        self.windowArray = windowArray
-        self.itemsList = itemsList
-        self.addressesList = addressesList
-        # Warehouse
-        self.warehouseLoopCount = warehouseLoopCount
-        self.datetimeNow = datetimeNow
-        self.timeStart = timeStart
-        self.timeElapsed = timeElapsed
-        self.warehouseBackgroundColour = warehouseBackgroundColour
-        self.warehouseWindowRes = warehouseWindowRes
-        self.warehouseWindowCenter = warehouseWindowCenter
-        self.warehouseWindowArray = warehouseWindowArray
-        self.warehousePerimeterCoordinates = warehousePerimeterCoordinates
+        self.windowRes = windowRes if windowRes is not None else []
+        self.windowBackgroundColour = windowBackgroundColour if windowBackgroundColour is not None else []
+        self.windowCenter = windowCenter if windowCenter is not None else []
+        self.windowArray = windowArray if windowArray is not None else []
+        self.itemsList = itemsList if itemsList is not None else []
+        self.addressesList = addressesList if addressesList is not None else []
+        # Warehouse timing
+        self.warehouseLoopCount = 0
+        self.datetimeNow = datetime.now()
+        self.timeStart = time.time()
+        self.timeElapsed = 0
+        self.warehouseBackgroundColour = []
+        self.warehouseWindowRes = []
+        self.warehouseWindowCenter = []
+        self.warehouseWindowArray = []
+        self.warehousePerimeterCoordinates = []
         self.logsMaxLength = logsMaxLength
-        self.dataMaxLength = dataMaxLength
-        self.warehouse_data = warehouse_data
+        self.dataMaxLength = 200
+        self.warehouse_data = []
         # Zone colours
-        self.colourOfImportAreas = colourOfImportAreas
-        self.colourOfStorageAreas = colourOfStorageAreas
-        self.colourOfExportAreas = colourOfExportAreas
+        self.colourOfImportAreas = (10, 30, 10)
+        self.colourOfStorageAreas = (30, 10, 10)
+        self.colourOfExportAreas = (10, 10, 30)
         # Areas Count and Availability
-        self.packagesInImportCount = packagesInImportCount
-        self.packagesInStorageCount = packagesInStorageCount
-        self.packagesInExportCount = packagesInExportCount
-        self.packagesInWarehouseCount = packagesInWarehouseCount
-        self.packagesPlannedInImportCount = packagesPlannedInImportCount
-        self.packagesPlannedInStorageCount = packagesPlannedInStorageCount
-        self.packagesPlannedInExportCount = packagesPlannedInExportCount
-        self.importSpaceAvailable = importSpaceAvailable
-        self.storageSpaceAvailable = storageSpaceAvailable
-        self.exportSpaceAvailable = exportSpaceAvailable
+        self.packagesInImportCount = 0
+        self.packagesInStorageCount = 0
+        self.packagesInExportCount = 0
+        self.packagesInWarehouseCount = 0
+        self.packagesPlannedInImportCount = 0
+        self.packagesPlannedInStorageCount = 0
+        self.packagesPlannedInExportCount = 0
+        self.importSpaceAvailable = True
+        self.storageSpaceAvailable = True
+        self.exportSpaceAvailable = True
         # Package Export
-        self.packageExportCount = packageExportCount
-        self.packageExportRollingCount = packageExportRollingCount
+        self.packageExportCount = 0
+        self.packageExportRollingCount = 0
         # Packages
-        self.packageDimensionsLimit = packageDimensionsLimit
-        self.packagesActionsList = packagesActionsList
-        self.packages = packages #[package#, addressFrom, addressTo, itemvalues, deadline, colour, area, location, status]
-        self.packagesLog = packagesLog #[package#, packagesListinput, action(import,export), datetime of action]
-        self.packagesMaxQuantity = packagesMaxQuantity
-        self.packagesMoveList = packagesMoveList #[package#]
-        self.packagesMaxMoveQuantity = packagesMaxMoveQuantity
-        self.packagesRollingCount = packagesRollingCount
-        self.packagesInWarehouse = packagesInWarehouse
-        self.packageTargetsInWarehouse = packageTargetsInWarehouse
+        self.packageDimensionsLimit = 1
+        self.packagesActionsList = ["idle", "carried"]
+        self.packages = []
+        # Bounded ring buffer — auto-trims to logsMaxLength so long runs don't thrash the allocator.
+        # Coerce to deque when caller passes a plain list (e.g. log-replay in tests).
+        self.packagesLog = deque(packagesLog, maxlen=logsMaxLength) if packagesLog is not None else deque(maxlen=logsMaxLength)
+        self.packagesMaxQuantity = 2000
+        self.packagesMoveList = []
+        self.packagesMaxMoveQuantity = 120
+        self.packagesRollingCount = 0
+        self.packagesInWarehouse = []
+        self.packageTargetsInWarehouse = []
         # Robots
-        self.packagesMovingList = packagesMovingList
+        self.packagesMovingList = []
         self.packagesReorgList = []          # pkg numbers needing priority re-scheduling after a zone change
         self.pending_zone_changes = set()    # (gx,gy) cells painted this tick, consumed by reconcile
-        self.robotsActionsList = robotsActionsList
-        self.robots = robots #[robot#, battery%, actionQueue, robotLog, xyLoc, xyLocTarget, status]
-        self.robotsLog = robotsLog
-        self.robotsInWarehouse = robotsInWarehouse
+        self.robotsActionsList = ["none", "idle", "charging", "move to charging station",
+                                  "move to target pickup location", "move to target dropoff location",
+                                  "pickup target package", "dropoff target package",
+                                  "move to exit", "move to idle"]
+        self.robots = []
+        # Bounded ring buffer — see packagesLog above.
+        self.robotsLog = deque(robotsLog, maxlen=logsMaxLength) if robotsLog is not None else deque(maxlen=logsMaxLength)
+        self.robotsInWarehouse = []
         self.robotsMaxQuantity = robotsMaxQuantity
         self._robot_target_count = robotsMaxQuantity
-        self.robotsRollingCount = robotsRollingCount
-        self.robotsInWarehouseCount = robotsInWarehouseCount
-        self.robotsTaskAssignmentList = robotsTaskAssignmentList #[robot#, #oftasks]
-        self.robotsTaskAssignmentStyle = robotsTaskAssignmentStyle
-        self.robotsTaskAssignmentMaxQuantity = robotsTaskAssignmentMaxQuantity
+        self.robotsRollingCount = 0
+        self.robotsInWarehouseCount = 0
+        self.robotsTaskAssignmentList = []
+        self.robotsTaskAssignmentStyle = 0
+        self.robotsTaskAssignmentMaxQuantity = 1
         # Charging Stations
-        self.chargersActionsList = chargersActionsList
-        self.chargers = chargers #[charger#, xyLocation, status]
+        self.chargersActionsList = ["none", "idle", "charging planned", "charging"]
+        self.chargers = []
         self.chargersMaxQuantity = chargersMaxQuantity
-        self.chargersInWarehouse = chargersInWarehouse
-        self.chargersRollingCount = chargersRollingCount
+        self.chargersInWarehouse = []
+        self.chargersRollingCount = 0
         # Spawn maps (None = use default perimeter coords, set after perimeter init)
-        self._chargerSpawnMap_override = chargerSpawnMap
-        self._robotSpawnMap_override   = robotSpawnMap
+        self._chargerSpawnMap_override = None
+        self._robotSpawnMap_override   = None
+        self._debug_invariants = _debug_invariants
         
         # Init Warehouse Screen
         self.windowCenter = Functions.get_screencenter(self.windowRes)
@@ -186,7 +176,7 @@ class Warehouse:
         _gw, _gh = self.windowRes
         self.traffic_total = np.zeros((_gh, _gw), dtype=np.uint32)
         self.traffic_ema   = np.zeros((_gh, _gw), dtype=np.float32)
-        self._traffic_last_time = time.time()
+        self._traffic_last_time = 0.0  # sim-time of last traffic update
         # ── Road map (derived from traffic_total, display-only for now) ──
         self.road_map = np.zeros((_gh, _gw), dtype=np.uint8)
         self._road_map_prev = np.zeros((_gh, _gw), dtype=np.uint8)
@@ -197,7 +187,7 @@ class Warehouse:
         self._road_flow    = None # persistent flow accumulator for incremental updates
         self._road_job     = None # in-progress RoadBuildJob (frame-distributed)
         self._road_rebuild_count = 0        # how many times we've rebuilt
-        self._road_last_rebuild = 0.0       # wall-clock time of last rebuild
+        self._road_last_rebuild = 0.0       # sim-time of last rebuild
         self.numberOfImportSlots  = int(np.count_nonzero(self.zoneMap == ZONE_IMPORT))
         self.numberOfStorageSlots = int(np.count_nonzero(self.zoneMap == ZONE_STORAGE))
         self.numberOfExportSlots  = int(np.count_nonzero(self.zoneMap == ZONE_EXPORT))
@@ -236,7 +226,7 @@ class Warehouse:
         self._flow_avg_delivery = 0.0    # EMA of delivery time (seconds)
         self._flow_avg_deadline = 0.0    # EMA of time-to-deadline at spawn (seconds)
         self._flow_throughput   = 0.0    # exports per second (EMA)
-        self._flow_last_export_t = time.time()
+        self._flow_last_export_t = 0.0  # sim-time of last export
         self._flow_policy_mode = 'balanced'
         self._flow_ema_alpha    = 0.02   # smoothing factor for EMAs
         # ── Conservative robot-scaled import configuration ──
@@ -371,7 +361,7 @@ class Warehouse:
         Falls back to nearest perimeter cell if birth location is unavailable.
         """
         r = self.robots[robot_index]
-        target = getattr(r, 'birthLocation', None)
+        target = r.birthLocation
         if target is None:
             # Fallback: nearest perimeter cell
             rx, ry = r.xyLocation
@@ -402,16 +392,41 @@ class Warehouse:
             self._queue_exit_task(robot_index)
 
     def _remove_robot(self, robot_index):
-        """Remove a decommissioned robot that has reached the perimeter."""
+        """Remove a decommissioned robot that has reached the perimeter.
+
+        Force-drops any package the robot is still carrying (instead of
+        crashing on assertion) and sweeps every queue/list that may still
+        reference the robot or its dropped package, so a single edge-case
+        can't leave the warehouse in a half-consistent state.
+        """
         r = self.robots[robot_index]
         rnum = r.robotNumber
-        assert r.carrying == -1, f'robot#{rnum} still carrying a package'
+        # Force-drop any carried package: reset to idle at the robot's current cell.
+        if r.carrying != -1:
+            _carried_pn = r.carrying
+            _pkg_idx = self._find_package(_carried_pn)
+            if _pkg_idx is not None:
+                _pkg = self.packages[_pkg_idx]
+                self._set_package_idle(_pkg, location=list(r.xyLocation))
+                _log.error('decommission: robot#%d removed while carrying pkg#%d - force-dropped at %s',
+                           rnum, _carried_pn, list(r.xyLocation))
+            else:
+                _log.error('decommission: robot#%d had carrying=%d but package not found',
+                           rnum, _carried_pn)
+            r.carrying = -1
+            # Sweep stale references to the dropped package out of move/moving lists.
+            self.packagesMoveList = [pn for pn in self.packagesMoveList if pn != _carried_pn]
+            self.packagesMovingList = [pn for pn in self.packagesMovingList if pn != _carried_pn]
+            self.packagesReorgList = [pn for pn in self.packagesReorgList if pn != _carried_pn]
         # Remove from task assignment list
         self.robotsTaskAssignmentList = [
             x for x in self.robotsTaskAssignmentList if x[0] != rnum]
         # Remove from robots list
         self.robots.pop(robot_index)
         self.robotsInWarehouseCount -= 1
+        # Invalidate entity-lookup caches so any subsequent _find_robot doesn't return a stale index.
+        self._robot_idx = {}
+        self._pkg_idx = {}
         _log.info('decommission: robot#%d removed from warehouse (fleet=%d)',
                    rnum, len(self.robots))
         # Rescale flow config for smaller fleet
@@ -471,15 +486,24 @@ class Warehouse:
         if self._road_job is not None:
             self._road_job.step()          # default 3 A* paths
             if self._road_job.done:
+                # Compute the new maps first, then swap all related fields
+                # together so no caller can ever observe a half-updated state
+                # (single-threaded, but documents intent + makes future
+                # extraction to a renderer thread safer).
+                _new_road_map, _new_hotspots, _new_edges, _new_flow, _new_plaza_map = self._road_job.result()
                 self._road_map_prev = self.road_map.copy()
                 self._plaza_map_prev = self.plaza_map.copy()
-                self.road_map, self.road_hotspots, self.road_edges, self._road_flow, self.plaza_map = self._road_job.result()
+                self.road_map = _new_road_map
+                self.road_hotspots = _new_hotspots
+                self.road_edges = _new_edges
+                self._road_flow = _new_flow
+                self.plaza_map = _new_plaza_map
                 self._apply_road_zone_erasure()
                 self._road_job = None
             return
 
         # ── start new job? ──────────────────────────────────────────────
-        now = time.time()
+        now = self._sim_time
         interval = min(2.0 + self._road_rebuild_count * 0.2, 6.0)
         if now - self._road_last_rebuild < interval:
             return
@@ -578,7 +602,7 @@ class Warehouse:
         No fleet-scaling or gain boosts — values are objective step counts.
         """
         _STATIC = {'idle', 'charging'}
-        now = time.time()
+        now = self._sim_time
         dt = max(now - self._traffic_last_time, 0.0)
         self._traffic_last_time = now
         # Time-anchored exponential decay
@@ -609,16 +633,16 @@ class Warehouse:
         self.reconcile_zone_changes() # Process user-painted cells; partial-flush affected plans
         self.invalidate_stale_targets() # Cancel in-flight moves whose targets no longer match zoneMap
         self.recount_planned() # Authoritative recount of planned counts
-        self.packages, self.packagesRollingCount, self.packagesInWarehouseCount, self.packagesLog, self.packageTargetsInWarehouse, self.packageExportCount, self.packageExportRollingCount = self.update_packages() # Update packages
-        self.chargers, self.chargersRollingCount, self.chargersInWarehouse = self.update_chargers()
-        self.packages, self.packagesMoveList, self.packagesMovingList, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount, self.robots, self.robotsRollingCount, self.robotsTaskAssignmentList, self.robotsLog, self.chargers = self.update_robots() # Update robots
-        self.packages = self.update_carried_packages()
-        self.packages, self.packagesInImportCount, self.packagesInStorageCount, self.packagesInExportCount = self.update_packages_areas()
-        self.packagesInWarehouse = self.update_packages_in_warehouse() # Update warehouse knowledge of packages
-        self.chargersInWarehouse = self.update_chargers_in_warehouse()
-        self.robotsInWarehouse = self.update_robots_in_warehouse()
-        self.importSpaceAvailable, self.storageSpaceAvailable, self.exportSpaceAvailable = self.update_space_available()
-        self.packagesLog, self.robotsLog = self.trim_logs()
+        self.update_packages()                   # Update packages
+        self.update_chargers()
+        self.update_robots()                      # Update robots
+        self.update_carried_packages()
+        self.update_packages_areas()
+        self.update_packages_in_warehouse()       # Update warehouse knowledge of packages
+        self.update_chargers_in_warehouse()
+        self.update_robots_in_warehouse()
+        self.update_space_available()
+        self.trim_logs()
         self.record_warehouse_data()
         # ── Periodic summary log (~every 5 sec at 40 tps) ──
         if self.warehouseLoopCount % 200 == 0:
@@ -646,7 +670,125 @@ class Warehouse:
                 self._flow_import_cap, self.packagesMaxQuantity,
                 self._flow_avg_delivery, self._flow_throughput)
         self.warehouseLoopCount += 1
+        if self._debug_invariants:
+            self._check_invariants()
+        # Always-on cheap invariant + auto-repair (every 100 ticks ~= every 2.5s sim time at 40 Hz).
+        if (self.warehouseLoopCount % 100) == 0:
+            self._check_invariants_lightweight()
         return self
+
+    def _check_invariants(self):
+        """Validate internal consistency (debug-only, off by default).
+
+        Logs errors for any detected inconsistencies without crashing.
+        """
+        _pkg_ids = {p.packageNumber for p in self.packages}
+        # 1. Every ID in packagesMoveList must exist in packages
+        for pn in self.packagesMoveList:
+            if pn not in _pkg_ids:
+                _log.error('INVARIANT: packagesMoveList contains pkg#%d not in packages', pn)
+        # 2. Every ID in packagesMovingList must exist and be carried or have active pickup
+        _active_pickups = set()
+        for r in self.robots:
+            for t in r.actionQueue:
+                if 'pickup' in t[1]:
+                    _active_pickups.update(
+                        p.packageNumber for p in self.packages
+                        if p.xyLocation == t[0] and p.status in ('move planned', 'carried'))
+        for pn in self.packagesMovingList:
+            if pn not in _pkg_ids:
+                _log.error('INVARIANT: packagesMovingList contains pkg#%d not in packages', pn)
+                continue
+            p = self.packages[self._find_package(pn)]
+            if p.status != 'carried' and pn not in _active_pickups:
+                _log.error('INVARIANT: pkg#%d in movingList but status=%s with no active pickup', pn, p.status)
+        # 3. No package with carrier != -1 while status is idle
+        for p in self.packages:
+            if p.carrier not in (None, -1) and p.status == 'idle':
+                _log.error('INVARIANT: pkg#%d status=idle but carrier=%s', p.packageNumber, p.carrier)
+        # 4. Every robot carrying must have a matching carried package
+        for r in self.robots:
+            if r.carrying != -1:
+                pi = self._find_package(r.carrying)
+                if pi is None:
+                    _log.error('INVARIANT: robot#%d carrying pkg#%d but package not found', r.robotNumber, r.carrying)
+                elif self.packages[pi].status != 'carried':
+                    _log.error('INVARIANT: robot#%d carrying pkg#%d but status=%s', r.robotNumber, r.carrying, self.packages[pi].status)
+        # 5. Planned counts match actual areaTarget counts
+        _planned_imp = sum(1 for p in self.packages if p.areaTarget == 'import')
+        _planned_sto = sum(1 for p in self.packages if p.areaTarget == 'storage')
+        _planned_exp = sum(1 for p in self.packages if p.areaTarget == 'export')
+        if _planned_imp != self.packagesPlannedInImportCount:
+            _log.error('INVARIANT: plannedImport count=%d vs actual=%d', self.packagesPlannedInImportCount, _planned_imp)
+        if _planned_sto != self.packagesPlannedInStorageCount:
+            _log.error('INVARIANT: plannedStorage count=%d vs actual=%d', self.packagesPlannedInStorageCount, _planned_sto)
+        if _planned_exp != self.packagesPlannedInExportCount:
+            _log.error('INVARIANT: plannedExport count=%d vs actual=%d', self.packagesPlannedInExportCount, _planned_exp)
+
+    def _check_invariants_lightweight(self):
+        """Cheap always-on invariant sweep with auto-repair (no raises).
+
+        Catches the few corruption shapes that have actually shown up in
+        practice: carrier/carrying asymmetry, idle-with-stale-areaTarget
+        zombies, and entity coords outside the grid. Repairs in place and
+        logs at error level so issues remain visible.
+        """
+        try:
+            _w = int(self.warehouseWindowRes[0])
+            _h = int(self.warehouseWindowRes[1])
+        except Exception:
+            return
+        # 1. Carrier <-> carrying symmetry. Auto-repair: drop the dangling carry.
+        for r in self.robots:
+            if r.carrying == -1:
+                continue
+            pi = self._find_package(r.carrying)
+            if pi is None:
+                _log.error('INVARIANT-LITE: robot#%d carrying pkg#%d (not found) - clearing',
+                           r.robotNumber, r.carrying)
+                r.carrying = -1
+                continue
+            p = self.packages[pi]
+            if p.status != 'carried' or p.carrier != r.robotNumber:
+                _log.error('INVARIANT-LITE: robot#%d carries pkg#%d but pkg.status=%s carrier=%s - resyncing',
+                           r.robotNumber, p.packageNumber, p.status, p.carrier)
+                p.status = 'carried'
+                p.carrier = r.robotNumber
+        # 2. Reverse: package marked carried must point at a real robot.
+        for p in self.packages:
+            if p.status != 'carried':
+                continue
+            if p.carrier in (None, -1) or self._find_robot(p.carrier) is None:
+                _log.error('INVARIANT-LITE: pkg#%d status=carried but carrier=%s missing - dropping to idle',
+                           p.packageNumber, p.carrier)
+                self._set_package_idle(p)
+        # 3. Idle package with stale areaTarget plan = "zombie idle". Auto-repair.
+        for p in self.packages:
+            if p.status == 'idle' and p.areaTarget != 'none':
+                _log.error('INVARIANT-LITE: pkg#%d idle but areaTarget=%s - clearing stale plan',
+                           p.packageNumber, p.areaTarget)
+                self._set_package_idle(p)
+        # 4. Entity coordinates within grid bounds.
+        for r in self.robots:
+            try:
+                _x, _y = int(r.xyLocation[0]), int(r.xyLocation[1])
+            except Exception:
+                _log.error('INVARIANT-LITE: robot#%d xyLocation=%r unreadable',
+                           r.robotNumber, r.xyLocation)
+                continue
+            if not (0 <= _x < _w and 0 <= _y < _h):
+                _log.error('INVARIANT-LITE: robot#%d out-of-grid at (%d,%d) - clamping',
+                           r.robotNumber, _x, _y)
+                r.xyLocation = [max(0, min(_w - 1, _x)), max(0, min(_h - 1, _y))]
+        for p in self.packages:
+            try:
+                _x, _y = int(p.xyLocation[0]), int(p.xyLocation[1])
+            except Exception:
+                continue
+            if not (0 <= _x < _w and 0 <= _y < _h):
+                _log.error('INVARIANT-LITE: pkg#%d out-of-grid at (%d,%d) - clamping',
+                           p.packageNumber, _x, _y)
+                p.xyLocation = [max(0, min(_w - 1, _x)), max(0, min(_h - 1, _y))]
 
     def update_zone_counts(self):
         """Recompute slot counts from zoneMap. Supports dynamic zone changes."""
@@ -724,9 +866,10 @@ class Warehouse:
             self._flow_import_cap = n_robots * 3
 
         # Track average deadline window from recently spawned packages
-        recent = [p for p in self.packages if (time.time() - p.createdAt) < 2.0]
+        recent = [p for p in self.packages if (self._sim_time - p.createdAt) < 2.0]
         if recent:
-            avg_dl = sum((p.deadline - datetime.fromtimestamp(p.createdAt)).total_seconds() for p in recent) / len(recent)
+            # For recently-spawned packages, timeToDeadline still approximates the full span
+            avg_dl = sum(p.timeToDeadline.total_seconds() for p in recent) / len(recent)
             a = self._flow_ema_alpha
             self._flow_avg_deadline = a * avg_dl + (1 - a) * self._flow_avg_deadline if self._flow_avg_deadline > 0 else avg_dl
 
@@ -769,8 +912,7 @@ class Warehouse:
                         if p.packageNumber in self.packagesMovingList:
                             self.packagesMovingList.remove(p.packageNumber)
                         if p.carrier not in (None, -1):
-                            ri = next((j for j, r in enumerate(self.robots)
-                                       if r.robotNumber == p.carrier), None)
+                            ri = self._find_robot(p.carrier)
                             if ri is not None:
                                 # Strip dropoff tasks from robot queue
                                 to_remove = [k for k, t in enumerate(self.robots[ri].actionQueue)
@@ -803,17 +945,18 @@ class Warehouse:
         if not self.pending_zone_changes:
             return
 
-        changed_cells = self.pending_zone_changes
+        # Snapshot then clear so any callback that fires mid-iteration (paint
+        # events fire inside cv2.waitKey, single-threaded) accumulates into a
+        # fresh set instead of mutating what we're iterating.
+        changed_cells = set(self.pending_zone_changes)
         self.pending_zone_changes = set()
 
-        ZONE_NAMES      = {ZONE_NONE: 'neutral', ZONE_IMPORT: 'import',
-                           ZONE_STORAGE: 'storage', ZONE_EXPORT: 'export'}
         PICKUP_ACTIONS  = {"move to target pickup location", "pick up target package"}
         DROPOFF_ACTIONS = {"move to target dropoff location", "drop off target package"}
 
         def _strip_robot_tasks(robot_number, action_set, location=None):
             """Remove matching tasks from a robot's action queue and adjust counts."""
-            ri = next((j for j, r in enumerate(self.robots) if r.robotNumber == robot_number), None)
+            ri = self._find_robot(robot_number)
             if ri is None:
                 return
             r = self.robots[ri]
@@ -838,63 +981,67 @@ class Warehouse:
                            for t in r.actionQueue)]
 
         for p in self.packages:
-            px, py  = p.xyLocation
-            tx, ty  = p.xyLocationTarget
-            cur_chg = (px, py) in changed_cells
-            tgt_chg = (tx, ty) in changed_cells
+            try:
+                px, py  = p.xyLocation
+                tx, ty  = p.xyLocationTarget
+                cur_chg = (px, py) in changed_cells
+                tgt_chg = (tx, ty) in changed_cells
 
-            if cur_chg and p.status == 'idle':
-                # Case A: idle package on repainted cell — reclassify area only
-                p.area = ZONE_NAMES.get(self.zoneMap[py][px], 'neutral')
-                if p.packageNumber not in self.packagesReorgList:
-                    self.packagesReorgList.append(p.packageNumber)
+                if cur_chg and p.status == 'idle':
+                    # Case A: idle package on repainted cell — reclassify area only
+                    p.area = ZONE_NAMES.get(self.zoneMap[py][px], 'neutral')
+                    if p.packageNumber not in self.packagesReorgList:
+                        self.packagesReorgList.append(p.packageNumber)
 
-            elif cur_chg and p.status == 'move planned':
-                # Case B: planned package on repainted cell — cancel plan + free inbound robot
-                self.packageTargetsInWarehouse[ty][tx] = 0
-                p.area = ZONE_NAMES.get(self.zoneMap[py][px], 'neutral')
-                p.areaTarget = 'none'
-                p.xyLocationTarget = p.xyLocation.copy()
-                p.status = 'idle'
-                if p.packageNumber in self.packagesMoveList:
-                    self.packagesMoveList.remove(p.packageNumber)
-                for rn in _robots_with_pickup_at([px, py]):
-                    _strip_robot_tasks(rn, PICKUP_ACTIONS, [px, py])
-                if p.packageNumber not in self.packagesReorgList:
-                    self.packagesReorgList.append(p.packageNumber)
+                elif cur_chg and p.status == 'move planned':
+                    # Case B: planned package on repainted cell — cancel plan + free inbound robot
+                    self.packageTargetsInWarehouse[ty][tx] = 0
+                    p.area = ZONE_NAMES.get(self.zoneMap[py][px], 'neutral')
+                    p.areaTarget = 'none'
+                    p.xyLocationTarget = p.xyLocation.copy()
+                    p.status = 'idle'
+                    if p.packageNumber in self.packagesMoveList:
+                        self.packagesMoveList.remove(p.packageNumber)
+                    for rn in _robots_with_pickup_at([px, py]):
+                        _strip_robot_tasks(rn, PICKUP_ACTIONS, [px, py])
+                    if p.packageNumber not in self.packagesReorgList:
+                        self.packagesReorgList.append(p.packageNumber)
 
-            elif tgt_chg and p.status == 'carried':
-                # Case C: robot carrying package to now-invalid target — abort carry
-                self.packageTargetsInWarehouse[ty][tx] = 0
-                p.areaTarget = 'none'
-                p.xyLocationTarget = p.xyLocation.copy()
-                p.status = 'idle'
-                if p.packageNumber in self.packagesMoveList:
-                    self.packagesMoveList.remove(p.packageNumber)
-                if p.packageNumber in self.packagesMovingList:
-                    self.packagesMovingList.remove(p.packageNumber)
-                if p.carrier not in (None, -1):
-                    _strip_robot_tasks(p.carrier, DROPOFF_ACTIONS)
-                    ri = next((j for j, r in enumerate(self.robots)
-                               if r.robotNumber == p.carrier), None)
-                    if ri is not None:
-                        self.robots[ri].carrying = -1
-                p.carrier = -1
-                if p.packageNumber not in self.packagesReorgList:
-                    self.packagesReorgList.append(p.packageNumber)
+                elif tgt_chg and p.status == 'carried':
+                    # Case C: robot carrying package to now-invalid target — abort carry
+                    self.packageTargetsInWarehouse[ty][tx] = 0
+                    p.areaTarget = 'none'
+                    p.xyLocationTarget = p.xyLocation.copy()
+                    p.status = 'idle'
+                    if p.packageNumber in self.packagesMoveList:
+                        self.packagesMoveList.remove(p.packageNumber)
+                    if p.packageNumber in self.packagesMovingList:
+                        self.packagesMovingList.remove(p.packageNumber)
+                    if p.carrier not in (None, -1):
+                        _strip_robot_tasks(p.carrier, DROPOFF_ACTIONS)
+                        ri = self._find_robot(p.carrier)
+                        if ri is not None:
+                            self.robots[ri].carrying = -1
+                    p.carrier = -1
+                    if p.packageNumber not in self.packagesReorgList:
+                        self.packagesReorgList.append(p.packageNumber)
 
-            elif tgt_chg and p.status == 'move planned' and not cur_chg:
-                # Case D: assigned target now wrong zone — cancel plan + free inbound robot
-                self.packageTargetsInWarehouse[ty][tx] = 0
-                p.areaTarget = 'none'
-                p.xyLocationTarget = p.xyLocation.copy()
-                p.status = 'idle'
-                if p.packageNumber in self.packagesMoveList:
-                    self.packagesMoveList.remove(p.packageNumber)
-                for rn in _robots_with_pickup_at([px, py]):
-                    _strip_robot_tasks(rn, PICKUP_ACTIONS, [px, py])
-                if p.packageNumber not in self.packagesReorgList:
-                    self.packagesReorgList.append(p.packageNumber)
+                elif tgt_chg and p.status == 'move planned' and not cur_chg:
+                    # Case D: assigned target now wrong zone — cancel plan + free inbound robot
+                    self.packageTargetsInWarehouse[ty][tx] = 0
+                    p.areaTarget = 'none'
+                    p.xyLocationTarget = p.xyLocation.copy()
+                    p.status = 'idle'
+                    if p.packageNumber in self.packagesMoveList:
+                        self.packagesMoveList.remove(p.packageNumber)
+                    for rn in _robots_with_pickup_at([px, py]):
+                        _strip_robot_tasks(rn, PICKUP_ACTIONS, [px, py])
+                    if p.packageNumber not in self.packagesReorgList:
+                        self.packagesReorgList.append(p.packageNumber)
+            except Exception:
+                # One bad cell must not leave the warehouse half-reconciled. Log and continue.
+                _log.exception('reconcile_zone_changes: failed for pkg#%s - skipping',
+                               getattr(p, 'packageNumber', '?'))
 
         self.recount_planned()
         self.robotsTaskAssignmentList.sort(key=lambda y: y[1], reverse=False)
@@ -913,10 +1060,8 @@ class Warehouse:
         return self.importSpaceAvailable, self.storageSpaceAvailable, self.exportSpaceAvailable
     
     def trim_logs(self):
-        if len(self.packagesLog) > self.logsMaxLength:
-            self.packagesLog = self.packagesLog[len(self.packagesLog)-self.logsMaxLength::]
-        if len(self.robotsLog) > self.logsMaxLength:
-            self.robotsLog = self.robotsLog[len(self.robotsLog)-self.logsMaxLength::]
+        # No-op: packagesLog / robotsLog are bounded deques (maxlen=logsMaxLength) and self-trim on append.
+        # Retained for backwards-compatibility with existing call sites.
         return self.packagesLog, self.robotsLog
 
     def record_warehouse_data(self):
@@ -935,6 +1080,7 @@ class Warehouse:
 
     # Update Packages
     def update_packages(self):
+        self._rebuild_entity_indices()
         # Determine spawn zone: prefer import, fall back to storage, then export
         spawnZoneId = None
         if self.importSpaceAvailable and self.numberOfImportSlots > 0:
@@ -946,7 +1092,11 @@ class Warehouse:
         if spawnZoneId is not None:
             # Use adaptive import cap instead of raw packagesMaxQuantity
             _effective_cap = min(self._flow_import_cap, self.packagesMaxQuantity)
+            _prev_count = len(self.packages)
             self.packagesRollingCount, self.packagesInImportCount, self.packagesInWarehouseCount, self.packages, self.packagesLog = Package_Functions.import_package(Package_Functions, self.zoneMap, self.chargersInWarehouse, self.packagesRollingCount, self.packagesInImportCount, self.packagesInWarehouseCount, self.packagesInWarehouse, self.packageTargetsInWarehouse, _effective_cap, self.packages, self.packagesLog, self.itemsList, self.addressesList, self.datetimeNow, spawnZoneId=spawnZoneId) # Import package
+            # Stamp new packages with sim-time
+            for _pi in range(_prev_count, len(self.packages)):
+                self.packages[_pi].createdAt = self._sim_time
         self.packages = self.update_packages_timeToDeadline(self.datetimeNow) # Update package timeToDeadline
         self.packages.sort(key=lambda x: x.deadline, reverse=False) # Sort packages by deadline
         self._reconcile_stale_moving_list()  # Clean orphaned packagesMovingList entries
@@ -972,14 +1122,13 @@ class Warehouse:
     def sort_packagesMoveList_by_deadline(self):
         if not self.packagesMoveList:
             return self.packagesMoveList
-        # Sort packagesMoveList by deadline
-        packageInMoveListCount = 0
-        for i in range(len(self.packages)):
-            packageNumber = self.packages[i].packageNumber
-            if (packageNumber in self.packagesMoveList):
-                self.packagesMoveList.remove(packageNumber)
-                self.packagesMoveList.insert(packageInMoveListCount, packageNumber)
-                packageInMoveListCount += 1
+        # Rebuild in deadline order: self.packages is already sorted by deadline,
+        # so iterating it preserves the ordering contract (front = most urgent).
+        move_set = set(self.packagesMoveList)
+        sorted_in_move = [p.packageNumber for p in self.packages if p.packageNumber in move_set]
+        # Defensive: keep any moveList IDs not found in packages (shouldn't happen)
+        remainder = [pn for pn in self.packagesMoveList if pn not in move_set]
+        self.packagesMoveList = sorted_in_move + remainder
         return self.packagesMoveList
 
     def _find_nearest_empty_cell(self, cx, cy):
@@ -1058,8 +1207,7 @@ class Warehouse:
         _zombie_carriers = {r.carrying for r in self.robots
                            if r.carrying != -1 and r.batteryPercent <= 0}
         for _zpkg in _zombie_carriers:
-            _zidx = next((j for j, p in enumerate(self.packages)
-                          if p.packageNumber == _zpkg), None)
+            _zidx = self._find_package(_zpkg)
             if _zidx is not None and self.packages[_zidx].status == 'carried':
                 _zrobot_idx = next((j for j, r in enumerate(self.robots)
                                     if r.carrying == _zpkg), None)
@@ -1073,7 +1221,7 @@ class Warehouse:
                     self.packages[_zidx].carrier = -1
                     self.packages[_zidx].areaTarget = 'none'
                     self.packages[_zidx].xyLocationTarget = self.packages[_zidx].xyLocation.copy()
-                    self.packages[_zidx].deliveredAt = time.time()
+                    self.packages[_zidx].deliveredAt = self._sim_time
                     self.robots[_zrobot_idx].carrying = -1
                     if _zpkg in self.packagesMovingList:
                         self.packagesMovingList.remove(_zpkg)
@@ -1083,7 +1231,7 @@ class Warehouse:
         for pkg_num in list(self.packagesMovingList):
             if pkg_num in _carried_pkgs:
                 continue
-            pkg_idx = next((j for j, p in enumerate(self.packages) if p.packageNumber == pkg_num), None)
+            pkg_idx = self._find_package(pkg_num)
             if pkg_idx is None:
                 # Package no longer exists
                 self.packagesMovingList.remove(pkg_num)
@@ -1125,13 +1273,12 @@ class Warehouse:
             'export':  max(0, self.packagesPlannedInExportCount  - free_export),
         }
         evicted = {'import': 0, 'storage': 0, 'export': 0}
-        _now_stale = time.time()
+        _now_stale = self._sim_time
         _STALE_PLAN_TIMEOUT = 5.0  # seconds before an unassigned 'move planned' is reset
         for packageNumber in list(reversed(self.packagesMoveList)):  # snapshot — list is mutated inside loop
             if (packageNumber not in self.packagesMovingList):
-                packageIndex = [y for y, x in enumerate(self.packages) if x.packageNumber == packageNumber]
-                if packageIndex:
-                    packageIndex = packageIndex[0]
+                packageIndex = self._find_package(packageNumber)
+                if packageIndex is not None:
                     packageStatus    = self.packages[packageIndex].status
                     packageAreaTarget = self.packages[packageIndex].areaTarget
                     removePackage = False
@@ -1142,7 +1289,7 @@ class Warehouse:
                             removePackage = True
                     elif (packageStatus == "move planned"):
                         # Evict plans that have been waiting for a robot too long.
-                        _planned_at = getattr(self.packages[packageIndex], 'plannedAt', None)
+                        _planned_at = self.packages[packageIndex].plannedAt
                         if _planned_at is not None and (_now_stale - _planned_at) > _STALE_PLAN_TIMEOUT:
                             removePackage = True
                             _log.debug('stale plan evict: pkg#%d areaTarget=%s age=%.1fs',
@@ -1200,18 +1347,18 @@ class Warehouse:
         total_headroom   = export_headroom + storage_headroom
         new_entries      = 0
 
-        _now = time.time()
+        _now = self._sim_time
         _IMPORT_COOLDOWN = 2.0  # seconds a newly-spawned package must settle before planning
         _DELIVERY_COOLDOWN = 2.0  # seconds after drop-off before re-queuing for next move
 
         def _import_ready(p):
             """True when package has cleared its import cooldown."""
-            age = _now - float(getattr(p, 'createdAt', _now))
+            age = _now - float(p.createdAt)
             return p.area != 'import' or age >= _IMPORT_COOLDOWN
 
         def _delivery_ready(p):
             """True when package has settled after its last drop-off."""
-            _delivered_at = getattr(p, 'deliveredAt', None)
+            _delivered_at = p.deliveredAt
             if _delivered_at is None:
                 return True
             return (_now - float(_delivered_at)) >= _DELIVERY_COOLDOWN
@@ -1220,8 +1367,7 @@ class Warehouse:
         # Reorg entries reclaim already-planned slot space so they don't consume
         # from new_entries (which caps against total_headroom for net-new work).
         for pkg_num in list(self.packagesReorgList):
-            pkg_idx = next((i for i, p in enumerate(self.packages)
-                            if p.packageNumber == pkg_num), None)
+            pkg_idx = self._find_package(pkg_num)
             if pkg_idx is not None:
                 p = self.packages[pkg_idx]
                 if (p.status == 'idle' and p.area != 'export'
@@ -1348,7 +1494,7 @@ class Warehouse:
                     if (movePackage == True):
                         self.packages[i].xyLocationTarget = xyLocation.copy()
                         self.packages[i].status = 'move planned'
-                        self.packages[i].plannedAt = time.time()
+                        self.packages[i].plannedAt = self._sim_time
                         self.packageTargetsInWarehouse[xyLocation[1]][xyLocation[0]] = 1
 
         # ── Overdue preemption pass (runs AFTER the main pass) ──
@@ -1395,7 +1541,7 @@ class Warehouse:
                         p.areaTarget = 'export'
                         p.xyLocationTarget = xyLocation.copy()
                         p.status = 'move planned'
-                        p.plannedAt = time.time()
+                        p.plannedAt = self._sim_time
                         self.packageTargetsInWarehouse[xyLocation[1]][xyLocation[0]] = 1
                         self.packagesPlannedInExportCount += 1
                         export_headroom -= 1
@@ -1404,7 +1550,7 @@ class Warehouse:
         for pkgNum in list(self.packagesMoveList):
             if pkgNum in self.packagesMovingList:
                 continue
-            idx = next((i for i, p in enumerate(self.packages) if p.packageNumber == pkgNum), None)
+            idx = self._find_package(pkgNum)
             if idx is not None and self.packages[idx].status == 'idle' and self.packages[idx].areaTarget == 'none':
                 self.packagesMoveList.remove(pkgNum)
         return self.packages, self.packageTargetsInWarehouse, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount
@@ -1414,9 +1560,8 @@ class Warehouse:
         if not self.packagesMoveList:
             return self.packageTargetsInWarehouse
         for packageNumber in self.packagesMoveList:
-            packageIndex = [y for y, x in enumerate(self.packages) if x.packageNumber == packageNumber]
-            if packageIndex:
-                packageIndex = packageIndex[0]
+            packageIndex = self._find_package(packageNumber)
+            if packageIndex is not None:
                 packageXYLocationTarget = self.packages[packageIndex].xyLocationTarget
                 self.packageTargetsInWarehouse[packageXYLocationTarget[1]][packageXYLocationTarget[0]] = 1
         return self.packageTargetsInWarehouse
@@ -1428,18 +1573,17 @@ class Warehouse:
             if self.packages[i].status == "carried":
                 packageNumber = self.packages[i].packageNumber
                 robotNumber = self.packages[i].carrier
-                robotIndex = [y for y, x in enumerate(self.robots) if x.robotNumber == robotNumber]
-                if not robotIndex:
+                robotIndex = self._find_robot(robotNumber)
+                if robotIndex is None:
                     # Carrier robot is gone — orphan the package so it can be replanned
                     self.packages[i].status = 'idle'
                     self.packages[i].carrier = -1
                     self.packages[i].areaTarget = 'none'
                     self.packages[i].xyLocationTarget = self.packages[i].xyLocation.copy()
-                    self.packages[i].deliveredAt = time.time()
+                    self.packages[i].deliveredAt = self._sim_time
                     _log.warning('orphan carried pkg#%d: carrier robot#%d not found -- reset to idle',
                                  packageNumber, robotNumber)
                     continue
-                robotIndex = robotIndex[0]
                 robotCarrying = self.robots[robotIndex].carrying
                 if (robotCarrying == packageNumber) and (self.packages[i].xyLocation != self.robots[robotIndex].xyLocation):
                     newLocation = [self.robots[robotIndex].xyLocation[0],self.robots[robotIndex].xyLocation[1]]
@@ -1480,7 +1624,7 @@ class Warehouse:
         A 1-second delivery fade blends from cyan toward idle colour after
         drop-off so recently-delivered packages don't snap to grey.
         """
-        _now = time.time()
+        _now = self._sim_time
         _DELIVERY_FADE_SECS = 1.0  # seconds for cyan→idle colour transition after drop-off
         for i in range(len(self.packages)):
             p = self.packages[i]
@@ -1505,7 +1649,7 @@ class Warehouse:
                 p.colour = [160, 140, 110]
 
             # Delivery fade: blend from cyan toward idle colour over _DELIVERY_FADE_SECS
-            _delivered_at = getattr(p, 'deliveredAt', None)
+            _delivered_at = p.deliveredAt
             if _delivered_at is not None and not _carried and not _assigned:
                 _age = _now - float(_delivered_at)
                 if _age < _DELIVERY_FADE_SECS:
@@ -1531,7 +1675,7 @@ class Warehouse:
     def package_export(self):
         self.packageExportCount = 0
         lenPackages = len(self.packages)
-        _now = time.time()
+        _now = self._sim_time
         i = 0
         while 1:
             if (not self.packages):
@@ -1546,8 +1690,9 @@ class Warehouse:
             packageLocation = self.packages[i].xyLocation
             packageTargetLocation = self.packages[i].xyLocationTarget
             canExport = (packageArea == "export") or (self.numberOfExportSlots == 0)
-            _delivered_at = getattr(self.packages[i], 'deliveredAt', None)
-            _cooldown_ok = (_delivered_at is not None) and (_now - _delivered_at >= 2.0)
+            _delivered_at = self.packages[i].deliveredAt
+            # 1e-6 epsilon guards against float-rounding flake when both times derive from sim_time accumulation.
+            _cooldown_ok = (_delivered_at is not None) and (_now - _delivered_at >= 2.0 - 1e-6)
             if canExport and _cooldown_ok and (packageTimeToDeadline < timedelta(seconds=0)) and (packageStatus == "idle"):
                 _delivery_time = _now - self.packages[i].createdAt
                 self._flow_export_times.append(_delivery_time)
@@ -1574,29 +1719,52 @@ class Warehouse:
     # Update Warehouse
     def update_packages_in_warehouse(self):
         self.packagesInWarehouse = np.zeros((self.warehouseWindowRes[1], self.warehouseWindowRes[0]), dtype = 'uint8')
+        _h, _w = self.packagesInWarehouse.shape
         for i in range(len(self.packages)):
             packageXY = self.packages[i].xyLocation
-            self.packagesInWarehouse[packageXY[1]][packageXY[0]] = 1
+            _x, _y = int(packageXY[0]), int(packageXY[1])
+            if 0 <= _x < _w and 0 <= _y < _h:
+                self.packagesInWarehouse[_y][_x] = 1
+            else:
+                _log.error('update_packages_in_warehouse: pkg#%d out-of-grid at (%d,%d) - skipped',
+                           self.packages[i].packageNumber, _x, _y)
         return self.packagesInWarehouse
     
     def update_robots_in_warehouse(self):
         self.robotsInWarehouse = np.zeros((self.warehouseWindowRes[1], self.warehouseWindowRes[0]), dtype = 'uint8')
+        _h, _w = self.robotsInWarehouse.shape
         for i in range(len(self.robots)):
             robotXY = self.robots[i].xyLocation
-            self.robotsInWarehouse[robotXY[1]][robotXY[0]] = 1
+            _x, _y = int(robotXY[0]), int(robotXY[1])
+            if 0 <= _x < _w and 0 <= _y < _h:
+                self.robotsInWarehouse[_y][_x] = 1
+            else:
+                _log.error('update_robots_in_warehouse: robot#%d out-of-grid at (%d,%d) - skipped',
+                           self.robots[i].robotNumber, _x, _y)
         return self.robotsInWarehouse
     
     def update_chargers_in_warehouse(self):
         self.chargersInWarehouse = np.zeros((self.warehouseWindowRes[1], self.warehouseWindowRes[0]), dtype = 'uint8')
+        _h, _w = self.chargersInWarehouse.shape
         for i in range(len(self.chargers)):
             chargerXY = self.chargers[i].xyLocation
-            self.chargersInWarehouse[chargerXY[1]][chargerXY[0]] = 1
+            _x, _y = int(chargerXY[0]), int(chargerXY[1])
+            if 0 <= _x < _w and 0 <= _y < _h:
+                self.chargersInWarehouse[_y][_x] = 1
+            else:
+                _log.error('update_chargers_in_warehouse: charger#%d out-of-grid at (%d,%d) - skipped',
+                           self.chargers[i].chargerNumber, _x, _y)
         return self.chargersInWarehouse
     
     # Update Robots
     def update_robots(self):
+        self._rebuild_entity_indices()
         # Import Robot
+        _prev_robot_count = len(self.robots)
         self.robotsRollingCount, self.robotsInWarehouseCount, self.robots, self.robotsTaskAssignmentList = Robot_Functions.import_robot(Robot_Functions, self.robotSpawnMap, self.robotsRollingCount, self.robotsInWarehouseCount, self.robotsMaxQuantity, self.robotsInWarehouse, self.robots, self.robotsTaskAssignmentList, self.chargersInWarehouse) # Import Robot
+        # Stamp new robots with sim-time
+        for _ri in range(_prev_robot_count, len(self.robots)):
+            self.robots[_ri].createdAt = self._sim_time
         # Update self-checks
         self.robots = self.update_robots_batteryPercent() # Deplete batteryPercent
         self.robots, self.robotsTaskAssignmentList, self.robotsLog, self.chargers, self.packagesMoveList = self.update_robots_checkBattery() # Self-check batteryPercent
@@ -1625,7 +1793,7 @@ class Warehouse:
                     and self.zoneMap[int(_r.xyLocation[1])][int(_r.xyLocation[0])] != ZONE_NONE):
                 self._queue_idle_move(_ii)
         # ── Remove decommissioned robots that reached the perimeter ──
-        _to_remove = [i for i, r in enumerate(self.robots) if getattr(r, '_pending_removal', False)]
+        _to_remove = [i for i, r in enumerate(self.robots) if r._pending_removal]
         for i in reversed(_to_remove):
             self._remove_robot(i)
         return self.packages, self.packagesMoveList, self.packagesMovingList, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount, self.robots, self.robotsRollingCount, self.robotsTaskAssignmentList, self.robotsLog, self.chargers
@@ -1650,7 +1818,7 @@ class Warehouse:
             r = self.robots[i]
             if r.status == 'charging':
                 mult = DRAIN_CHARGING
-            elif r.xyLocation != r.xyLocationTarget and float(getattr(r, 'velocity', 0.0)) > 0.02:
+            elif r.xyLocation != r.xyLocationTarget and float(r.velocity) > 0.02:
                 mult = DRAIN_CARRYING if r.carrying != -1 else DRAIN_MOVING
             else:
                 mult = DRAIN_IDLE
@@ -1660,20 +1828,30 @@ class Warehouse:
         return self.robots
     
     def update_robots_checkBattery(self):
-        # --- Reconcile charger reservations ---
-        # Build ground-truth set of charger locations currently claimed by robot action queues.
+        self._reconcile_charger_reservations()
+        self._update_charge_policy_metrics()
+        for i in range(len(self.robots)):
+            if self.robots[i].decommissioning:
+                continue
+            self._dispatch_charging_if_needed(i)
+            self._emergency_battery_drop(i)
+            self.robots[i].batteryPercent = Functions.ensure_limit_1d(self.robots[i].batteryPercent, 0, 100)
+        
+        return self.robots, self.robotsTaskAssignmentList, self.robotsLog, self.chargers, self.packagesMoveList
+
+    def _reconcile_charger_reservations(self):
+        """Free chargers stuck in 'charging planned' with no robot heading there."""
         actively_claimed = set()
         for r in self.robots:
             for task in r.actionQueue:
                 if task[1] in ("move to charging station", "charging"):
                     actively_claimed.add(tuple(task[0]))
-        # Any charger stuck in "charging planned" with no robot heading there is a stale
-        # reservation — free it so it can be reassigned.
         for charger in self.chargers:
             if charger.status == "charging planned" and tuple(charger.xyLocation) not in actively_claimed:
                 charger.status = "idle"
-        # --- End reconciliation ---
-        # --- Adaptive Power Policy metrics ---
+
+    def _update_charge_policy_metrics(self):
+        """Recompute adaptive power-policy pressure and threshold each tick."""
         _n_chargers = max(len(self.chargers), 1)
         _n_busy = sum(1 for c in self.chargers if c.status != 'idle')
         self._charger_pressure_raw = _n_busy / _n_chargers
@@ -1682,8 +1860,6 @@ class Warehouse:
         self._charger_pressure += (_alpha_p * (self._charger_pressure_raw - self._charger_pressure))
         self._avg_fleet_battery = (sum(r.batteryPercent for r in self.robots)
                                    / max(len(self.robots), 1))
-        # Dynamic charge threshold: base + pressure-scaled span.
-        # The active threshold follows the target smoothly to avoid abrupt policy flips.
         self._charge_threshold_target = self._charge_threshold_base + self._charge_threshold_span * self._charger_pressure_raw
         self._charge_threshold += (_alpha_t * (self._charge_threshold_target - self._charge_threshold))
         self._charge_threshold = np.clip(
@@ -1691,95 +1867,80 @@ class Warehouse:
             self._charge_threshold_base,
             self._charge_threshold_base + self._charge_threshold_span,
         )
-        # --- End Adaptive Power Policy metrics ---
-        for i in range(len(self.robots)):
-            if self.robots[i].decommissioning:
-                continue
-            # Distance-aware threshold: if the nearest charger is far,
-            # the robot must start heading there earlier.
-            _travel_cost_i = 0.0
-            _avail_tmp, _c_tmp = self.find_available_charger(self.robots[i])
-            if _avail_tmp:
-                _travel_cost_i = self._estimate_charge_travel_cost(
-                    self.robots[i], self.chargers[_c_tmp].xyLocation)
-            _effective_threshold = self._charge_threshold + _travel_cost_i
-            if self.robots[i].batteryPercent <= _effective_threshold:
-                if self.robots[i].status != "charging":
-                    if self.robots[i].actionQueue:
-                        robotQueuedCharging = [x for x in self.robots[i].actionQueue if "move to charging station" in x]
-                        if not robotQueuedCharging:
-                            chargerAvailable, c = self.find_available_charger(self.robots[i])
-                            if (chargerAvailable == True):
-                                chargingStationLocation = self.chargers[c].xyLocation
-                                if ("dropoff" not in self.robots[i].status):
-                                    _prev_task = self.robots[i].actionQueue[1][1] if len(self.robots[i].actionQueue) > 1 else 'none'
-                                    self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_insert_task(i, 0, chargingStationLocation, "move to charging station")
-                                    self._compute_robot_path(i, chargingStationLocation)
-                                    self.chargers[c].status = "charging planned"
-                                    _log.info('battery preempt: robot#%d batt=%.1f%% -> charger %s (displaced: %s)',
-                                              self.robots[i].robotNumber, self.robots[i].batteryPercent,
-                                              chargingStationLocation, _prev_task)
-                                    self.robotsTaskAssignmentList.sort(key=lambda y: y[1], reverse=False)
-                    else:
-                        chargerAvailable, c = self.find_available_charger(self.robots[i])
-                        if (chargerAvailable == True):
-                            chargingStationLocation = self.chargers[c].xyLocation
-                            if ("dropoff" not in self.robots[i].status):
-                                self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_insert_task(i, 0, chargingStationLocation, "move to charging station")
-                                self._compute_robot_path(i, chargingStationLocation)
-                                self.chargers[c].status = "charging planned"
-                                self.robotsTaskAssignmentList.sort(key=lambda y: y[1], reverse=False) # Sort robotTasksAssignmentList by #tasks
-                                _log.info('battery preempt: robot#%d batt=%.1f%% -> charger %s (idle robot)',
-                                          self.robots[i].robotNumber, self.robots[i].batteryPercent,
-                                          chargingStationLocation)
-            # Opportunistic top-off: idle robots charge proactively when chargers plentiful
-            elif (self.robots[i].batteryPercent <= 70
-                  and self._charger_pressure < 0.3
-                  and self.robots[i].status == 'idle'
-                  and not self.robots[i].actionQueue):
-                chargerAvailable, c = self.find_available_charger(self.robots[i])
-                if chargerAvailable:
-                    _csl = self.chargers[c].xyLocation
-                    self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_insert_task(i, 0, _csl, "move to charging station")
-                    self._compute_robot_path(i, _csl)
-                    self.chargers[c].status = "charging planned"
-                    self.robotsTaskAssignmentList.sort(key=lambda y: y[1], reverse=False)
-                    _log.debug('opportunistic top-off: robot#%d batt=%.1f%% pressure=%.2f -> charger %s',
-                               self.robots[i].robotNumber, self.robots[i].batteryPercent,
-                               self._charger_pressure, _csl)
-            if self.robots[i].batteryPercent <= self._critical_batt_pct:
-                # Battery critically low — emergency-drop carried package so it
-                # doesn't get permanently stuck on a dying robot.
-                if self.robots[i].carrying != -1:
-                    _epkg = self.robots[i].carrying
-                    _epidx = next((j for j, p in enumerate(self.packages)
-                                   if p.packageNumber == _epkg), None)
-                    if _epidx is not None:
-                        _eloc = self._find_nearest_empty_cell(
-                            self.robots[i].xyLocation[0], self.robots[i].xyLocation[1])
-                        self.packages[_epidx].xyLocation = _eloc
-                        _log.warning('emergency drop: robot#%d batt=%.1f%% force-dropping pkg#%d at %s',
-                                     self.robots[i].robotNumber, self.robots[i].batteryPercent,
-                                     _epkg, _eloc)
-                        self.packages[_epidx].status = 'idle'
-                        self.packages[_epidx].carrier = -1
-                        self.packages[_epidx].areaTarget = 'none'
-                        self.packages[_epidx].xyLocationTarget = self.packages[_epidx].xyLocation.copy()
-                        self.packages[_epidx].deliveredAt = time.time()
-                        self.packageTargetsInWarehouse[self.packages[_epidx].xyLocation[1]][self.packages[_epidx].xyLocation[0]] = 0
-                        self.robots[i].carrying = -1
-                        # Clean up move/moving lists
-                        if _epkg in self.packagesMovingList:
-                            self.packagesMovingList.remove(_epkg)
-                        if _epkg in self.packagesMoveList:
-                            self.packagesMoveList.remove(_epkg)
-                        # Strip delivery tasks from robot queue
-                        for _tname in ('move to target dropoff location', 'drop off target package',
-                                       'move to target pickup location', 'pick up target package'):
-                            self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, _tname)
-            self.robots[i].batteryPercent = Functions.ensure_limit_1d(self.robots[i].batteryPercent, 0, 100)
-        
-        return self.robots, self.robotsTaskAssignmentList, self.robotsLog, self.chargers, self.packagesMoveList
+
+    def _dispatch_charging_if_needed(self, i):
+        """Send robot *i* to a charger if battery is below the effective threshold."""
+        robot = self.robots[i]
+        # Distance-aware threshold: if the nearest charger is far,
+        # the robot must start heading there earlier.
+        _travel_cost_i = 0.0
+        _avail_tmp, _c_tmp = self.find_available_charger(robot)
+        if _avail_tmp:
+            _travel_cost_i = self._estimate_charge_travel_cost(
+                robot, self.chargers[_c_tmp].xyLocation)
+        _effective_threshold = self._charge_threshold + _travel_cost_i
+        if robot.batteryPercent <= _effective_threshold:
+            if robot.status != "charging":
+                robotQueuedCharging = [x for x in robot.actionQueue if "move to charging station" in x]
+                if not robotQueuedCharging:
+                    chargerAvailable, c = self.find_available_charger(robot)
+                    if chargerAvailable and "dropoff" not in robot.status:
+                        chargingStationLocation = self.chargers[c].xyLocation
+                        _prev_task = robot.actionQueue[1][1] if len(robot.actionQueue) > 1 else 'none'
+                        self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_insert_task(i, 0, chargingStationLocation, "move to charging station")
+                        self._compute_robot_path(i, chargingStationLocation)
+                        self.chargers[c].status = "charging planned"
+                        _log.info('battery preempt: robot#%d batt=%.1f%% -> charger %s (displaced: %s)',
+                                  robot.robotNumber, robot.batteryPercent,
+                                  chargingStationLocation, _prev_task)
+                        self.robotsTaskAssignmentList.sort(key=lambda y: y[1], reverse=False)
+        # Opportunistic top-off: idle robots charge proactively when chargers plentiful
+        elif (robot.batteryPercent <= 70
+              and self._charger_pressure < 0.3
+              and robot.status == 'idle'
+              and not robot.actionQueue):
+            chargerAvailable, c = self.find_available_charger(robot)
+            if chargerAvailable:
+                _csl = self.chargers[c].xyLocation
+                self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_insert_task(i, 0, _csl, "move to charging station")
+                self._compute_robot_path(i, _csl)
+                self.chargers[c].status = "charging planned"
+                self.robotsTaskAssignmentList.sort(key=lambda y: y[1], reverse=False)
+                _log.debug('opportunistic top-off: robot#%d batt=%.1f%% pressure=%.2f -> charger %s',
+                           robot.robotNumber, robot.batteryPercent,
+                           self._charger_pressure, _csl)
+
+    def _emergency_battery_drop(self, i):
+        """Force-drop the carried package if battery is critically low."""
+        robot = self.robots[i]
+        if robot.batteryPercent > self._critical_batt_pct:
+            return
+        if robot.carrying == -1:
+            return
+        _epkg = robot.carrying
+        _epidx = self._find_package(_epkg)
+        if _epidx is None:
+            return
+        _eloc = self._find_nearest_empty_cell(robot.xyLocation[0], robot.xyLocation[1])
+        self.packages[_epidx].xyLocation = _eloc
+        _log.warning('emergency drop: robot#%d batt=%.1f%% force-dropping pkg#%d at %s',
+                     robot.robotNumber, robot.batteryPercent, _epkg, _eloc)
+        self.packages[_epidx].status = 'idle'
+        self.packages[_epidx].carrier = -1
+        self.packages[_epidx].areaTarget = 'none'
+        self.packages[_epidx].xyLocationTarget = self.packages[_epidx].xyLocation.copy()
+        self.packages[_epidx].deliveredAt = self._sim_time
+        self.packageTargetsInWarehouse[self.packages[_epidx].xyLocation[1]][self.packages[_epidx].xyLocation[0]] = 0
+        robot.carrying = -1
+        # Clean up move/moving lists
+        if _epkg in self.packagesMovingList:
+            self.packagesMovingList.remove(_epkg)
+        if _epkg in self.packagesMoveList:
+            self.packagesMoveList.remove(_epkg)
+        # Strip delivery tasks from robot queue
+        for _tname in ('move to target dropoff location', 'drop off target package',
+                       'move to target pickup location', 'pick up target package'):
+            self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, _tname)
     
     @staticmethod
     def _estimate_charge_travel_cost(robot, charger_loc):
@@ -1849,7 +2010,7 @@ class Warehouse:
         n = len(path)
         max_v = float(robot.maxVelocity)
         if robot.carrying != -1:
-            max_v *= 0.92
+            max_v *= ROBOT_CARRY_SPEED_PENALTY
         accel = max(float(robot.accelerationRate), 1e-6)
         decel = max(float(robot.decelerationRate), 1e-6)
 
@@ -1966,9 +2127,8 @@ class Warehouse:
         if self.packagesMoveList:
             for packageNumber in self.packagesMoveList:
                 if (packageNumber not in self.packagesMovingList):
-                    packageIndex = [i for i, x in enumerate(self.packages) if x.packageNumber == packageNumber]
-                    if packageIndex:
-                        packageIndex = packageIndex[0]
+                    packageIndex = self._find_package(packageNumber)
+                    if packageIndex is not None:
                         packageArea = self.packages[packageIndex].area
                         packageAreaTarget = self.packages[packageIndex].areaTarget
                         packageStatus = self.packages[packageIndex].status
@@ -1977,7 +2137,8 @@ class Warehouse:
                             robotTaskQuantity = self.robotsTaskAssignmentList[0][1]
                             # Treat robots with only a "move to idle" task as available (0 real tasks)
                             _candidate_num = self.robotsTaskAssignmentList[0][0]
-                            _candidate_r = next((r for r in self.robots if r.robotNumber == _candidate_num), None)
+                            _cidx = self._find_robot(_candidate_num)
+                            _candidate_r = self.robots[_cidx] if _cidx is not None else None
                             _effective_task_qty = robotTaskQuantity
                             if (_candidate_r and robotTaskQuantity == 1
                                     and _candidate_r.actionQueue
@@ -1986,10 +2147,11 @@ class Warehouse:
                             if (_effective_task_qty < self.robotsTaskAssignmentMaxQuantity):
                                 robotNumberInList = _candidate_num
                                 # Skip decommissioning robots
-                                _candidate_robot = next((r for r in self.robots if r.robotNumber == robotNumberInList), None)
+                                _cidx2 = self._find_robot(robotNumberInList)
+                                _candidate_robot = self.robots[_cidx2] if _cidx2 is not None else None
                                 if _candidate_robot and _candidate_robot.decommissioning:
                                     continue
-                                robotIndex = [y for y, x in enumerate(self.robots) if x.robotNumber == robotNumberInList][0]
+                                robotIndex = self._find_robot(robotNumberInList)
                                 # Power Policy: don't assign new work below work-safe battery floor.
                                 if self.robots[robotIndex].batteryPercent < self._work_min_batt_pct:
                                     continue
@@ -2096,26 +2258,8 @@ class Warehouse:
                 robot.movementProgress = 0.0
                 continue
 
-            _hist = list(robot.recentLocations)
-            _start = tuple(robot.xyLocation)
-            _occupied.discard(_start)
-
-            # ── Consume already-reached waypoints ──────────────────────
-            while robot.path:
-                if (int(robot.path[0][0]) == int(robot.xyLocation[0])
-                        and int(robot.path[0][1]) == int(robot.xyLocation[1])):
-                    robot.path.pop(0)
-                    if robot.pathPlan:
-                        robot.pathPlan.pop(0)
-                else:
-                    break
-
-            # ── Set immediate movement target ──────────────────────────
-            if robot.path:
-                robot.xyLocationTarget = list(robot.path[0])
-            elif robot.actionQueue:
-                robot.xyLocationTarget = [int(robot.actionQueue[0][0][0]),
-                                          int(robot.actionQueue[0][0][1])]
+            _occupied.discard(tuple(robot.xyLocation))
+            self._robot_consume_waypoints(i)
 
             # ── At destination? ────────────────────────────────────────
             if robot.xyLocation == robot.xyLocationTarget:
@@ -2126,334 +2270,405 @@ class Warehouse:
                 robot.movementProgress = 0.0
                 robot.blockedTicks = 0
             else:
-                _moved = False
-                _cx = int(robot.xyLocation[0])
-                _cy = int(robot.xyLocation[1])
-                _tx = int(robot.xyLocationTarget[0])
-                _ty = int(robot.xyLocationTarget[1])
-
-                # ── Step direction: unit-clamped toward target cell ────
-                _dx = max(-1, min(1, _tx - _cx))
-                _dy = max(-1, min(1, _ty - _cy))
-                _step_angle = (math.degrees(math.atan2(_dy, _dx))
-                               if (_dx or _dy)
-                               else float(robot.direction))
-
-                # ── Heading (snap to step direction for display) ─────
-                robot.direction = round(_step_angle, 2)
-                robot.targetDirection = robot.direction
-                robot.degrees = round(robot.direction)
-                robot.xyLocationDiff = [_dx, _dy]
-                _cardinal = Functions.find_cardinal(robot.degrees)
-                robot.cardinal = _cardinal
-                robot.lastCardinal = _cardinal
-
-                # ── Desired speed ──────────────────────────────────────
-                _desired = float(robot.maxVelocity)
-                if robot.carrying != -1:
-                    _desired *= 0.90
-
-                # Tiered speed based on road tier and zone
-                _road_tier = self.road_map[_cy, _cx]
-                if _road_tier >= 2:           # collector / arterial: full speed
-                    pass
-                elif _road_tier == 1:         # branch road: slight slowdown
-                    _desired *= 0.85
-                elif self.zoneMap[_cy, _cx] == 0:  # neutral corridor, no road
-                    _desired *= 0.70
-                else:                         # inside zone, no road (shelves)
-                    _desired *= 0.35
-
-                # Battery limp mode
-                _lt = self._limp_mode_batt_pct
-                if robot.batteryPercent < _lt:
-                    _desired = min(
-                        _desired,
-                        0.25 + 0.75 * max(robot.batteryPercent, 0)
-                        / max(_lt, 1))
-
-                # Approach braking: only slow down in the last few cells
-                # to the final task goal.  The live velocity smoothing
-                # handles gradual deceleration; this just ensures we don't
-                # overshoot at full speed.
-                _brake_pt = list(robot.xyLocationTarget)
-                if robot.actionQueue:
-                    _brake_pt = robot.actionQueue[0][0]
-                elif robot.pathTarget:
-                    _brake_pt = robot.pathTarget
-                _dist_goal = max(
-                    abs(int(_brake_pt[0]) - _cx),
-                    abs(int(_brake_pt[1]) - _cy))
-                if _dist_goal <= 1:
-                    _desired = min(_desired, float(robot.minMovingVelocity))
-                elif _dist_goal <= 3:
-                    _desired = min(_desired, float(robot.maxVelocity) * 0.5)
-
-                # Pre-computed speed envelope (corners, accel, decel)
-                if robot.pathPlan:
-                    _desired = min(
-                        _desired,
-                        robot.pathPlan[0].get('speed', _desired))
-
-                # ── Velocity smoothing ─────────────────────────────────
-                robot.desiredVelocity = round(_desired, 3)
-                if robot.velocity < _desired:
-                    robot.velocity = min(
-                        _desired,
-                        robot.velocity + robot.accelerationRate)
-                else:
-                    robot.velocity = max(
-                        _desired,
-                        robot.velocity - robot.decelerationRate)
-                if (_desired > 0
-                        and 0 < robot.velocity < robot.minMovingVelocity):
-                    robot.velocity = robot.minMovingVelocity
-
-                # ── Movement step ──────────────────────────────────────
-                _diagonal = (_dx != 0 and _dy != 0)
-                _step_cost = 1.414 if _diagonal else 1.0
-                robot.movementProgress += robot.velocity
-                if robot.movementProgress >= _step_cost and (_dx or _dy):
-                    _nx, _ny = _cx + _dx, _cy + _dy
-                    _nc = (_nx, _ny)
-
-                    if not (0 <= _nx < _w and 0 <= _ny < _h):
-                        # Out of bounds — path error
-                        robot.movementProgress = 0.0
-                        robot.blockedTicks += 1
-                    elif _nc in _occupied:
-                        # Another robot occupies the cell — check for head-on
-                        _blocker = None
-                        for _other in self.robots:
-                            if (int(_other.xyLocation[0]) == _nx
-                                    and int(_other.xyLocation[1]) == _ny):
-                                _blocker = _other
-                                break
-                        # Head-on detection: blocker is heading toward us
-                        _head_on = False
-                        if _blocker is not None:
-                            _bdx = int(getattr(_blocker, 'xyLocationDiff', [0,0])[0])
-                            _bdy = int(getattr(_blocker, 'xyLocationDiff', [0,0])[1])
-                            # Opposite directions: our step + their step = (0,0)
-                            if (_dx + _bdx == 0 and _dy + _bdy == 0
-                                    and (_bdx or _bdy)):
-                                _head_on = True
-                        # Right-of-way: lower robotNumber yields sideways
-                        if _head_on and robot.robotNumber < _blocker.robotNumber:
-                            # Try perpendicular sidestep
-                            _yielded = False
-                            # Perpendicular directions to our travel
-                            _perps = [(-_dy, _dx), (_dy, -_dx)]
-                            for _pdx, _pdy in _perps:
-                                _sx, _sy = _cx + _pdx, _cy + _pdy
-                                if (0 <= _sx < _w and 0 <= _sy < _h
-                                        and (_sx, _sy) not in _occupied):
-                                    robot.xyLocation[0] = _sx
-                                    robot.xyLocation[1] = _sy
-                                    _occupied.add((_sx, _sy))
-                                    robot.movementProgress -= _step_cost
-                                    robot.blockedTicks = 0
-                                    _moved = True
-                                    _yielded = True
-                                    # Replan path from new position
-                                    if robot.replanCooldownTicks <= 0:
-                                        _goal = (list(robot.actionQueue[0][0])
-                                                 if robot.actionQueue
-                                                 else list(robot.xyLocationTarget))
-                                        self._compute_robot_path(i, _goal, cooldown_ticks=4)
-                                    break
-                            if not _yielded:
-                                robot.velocity = max(
-                                    0.0, robot.velocity - robot.decelerationRate)
-                                robot.movementProgress = min(
-                                    robot.movementProgress, 0.35)
-                                robot.blockedTicks += 1
-                        else:
-                            # Normal blocking — wait
-                            robot.velocity = max(
-                                0.0, robot.velocity - robot.decelerationRate)
-                            robot.movementProgress = min(
-                                robot.movementProgress, 0.35)
-                            robot.blockedTicks += 1
-                    else:
-                        # Successful step
-                        robot.xyLocation[0] = _nx
-                        robot.xyLocation[1] = _ny
-                        _occupied.add(_nc)
-                        robot.movementProgress -= _step_cost
-                        robot.blockedTicks = 0
-                        _moved = True
-
-                        # Advance waypoints after step
-                        while robot.path:
-                            if (int(robot.path[0][0]) == _nx
-                                    and int(robot.path[0][1]) == _ny):
-                                robot.path.pop(0)
-                                if robot.pathPlan:
-                                    robot.pathPlan.pop(0)
-                            else:
-                                break
-                        if robot.path:
-                            robot.xyLocationTarget = list(robot.path[0])
-                        elif robot.actionQueue:
-                            robot.xyLocationTarget = [int(robot.actionQueue[0][0][0]),
-                                                      int(robot.actionQueue[0][0][1])]
-                        if robot.xyLocation == robot.xyLocationTarget:
-                            robot.movementProgress = 0.0
-                else:
-                    # Not enough movement budget yet — count as blocked.
-                    robot.blockedTicks += 1
-
-                # ── Recovery ───────────────────────────────────────────
+                _moved = self._robot_step_movement(i, _occupied, _w, _h)
                 if not _moved:
-                    _bt = robot.blockedTicks
-                    _has_path = bool(robot.path)
-
-                    # Path drift: next waypoint is far → path is stale
-                    if (_has_path
-                            and max(abs(int(robot.path[0][0]) - _cx),
-                                    abs(int(robot.path[0][1]) - _cy)) > 2
-                            and robot.replanCooldownTicks <= 0):
-                        _goal = (list(robot.actionQueue[0][0])
-                                 if robot.actionQueue
-                                 else list(robot.xyLocationTarget))
-                        self._compute_robot_path(i, _goal, cooldown_ticks=6)
-                        _has_path = bool(robot.path)
-
-                    # Local unstick: try any free neighbour closer to
-                    # target (only when far enough to avoid drift,
-                    # unless the target itself is adjacent and free).
-                    if _bt >= 12:
-                        _target_d = max(abs(_tx - _cx), abs(_ty - _cy))
-                        _best_uc = None
-                        _best_ud = _target_d
-                        for _udx, _udy in ((1,0),(1,1),(0,1),(-1,1),
-                                            (-1,0),(-1,-1),(0,-1),(1,-1)):
-                            _ux, _uy = _cx + _udx, _cy + _udy
-                            if not (0 <= _ux < _w and 0 <= _uy < _h):
-                                continue
-                            if (_ux, _uy) in _occupied:
-                                continue
-                            _ud = max(abs(_tx - _ux), abs(_ty - _uy))
-                            if _ud < _best_ud:
-                                _best_ud = _ud
-                                _best_uc = (_ux, _uy)
-                        if _best_uc:
-                            _sd = math.degrees(math.atan2(
-                                _best_uc[1] - _cy,
-                                _best_uc[0] - _cx))
-                            robot.direction = self._rotate_toward_deg(
-                                float(robot.direction), _sd, 180.0)
-                            robot.xyLocation[0] = _best_uc[0]
-                            robot.xyLocation[1] = _best_uc[1]
-                            _occupied.add(_best_uc)
-                            robot.movementProgress = 0.0
-                            robot.blockedTicks = 0
-                            _moved = True
-
-                    # Waypoint skip (need ≥2 so there's a next target)
-                    if (not _moved and _bt >= 16
-                            and _has_path and len(robot.path) >= 2):
-                        robot.path.pop(0)
-                        if robot.pathPlan:
-                            robot.pathPlan.pop(0)
-                        robot.xyLocationTarget = list(robot.path[0])
-                        robot.blockedTicks = 0
-                        _log.debug(
-                            'waypoint skip: robot#%d -> now %s',
-                            robot.robotNumber, robot.xyLocationTarget)
-
-                    # Full replan
-                    _replan_at = 8 if _has_path else 14
-                    if (not _moved
-                            and _bt >= _replan_at
-                            and robot.pathAge >= 4
-                            and robot.replanCooldownTicks <= 0
-                            and robot.xyLocation != robot.xyLocationTarget):
-                        _goal = (list(robot.actionQueue[0][0])
-                                 if robot.actionQueue
-                                 else list(robot.xyLocationTarget))
-                        self._compute_robot_path(i, _goal, cooldown_ticks=6)
-                        _log.debug(
-                            'replan: robot#%d blocked=%d at %s',
-                            robot.robotNumber, _bt,
-                            list(robot.xyLocation))
+                    self._robot_recover_stuck(i, _occupied, _w, _h)
 
             # ── History ────────────────────────────────────────────────
+            _hist = list(robot.recentLocations)
             _hist.append(tuple(robot.xyLocation))
             if len(_hist) > 8:
                 _hist = _hist[-8:]
             robot.recentLocations = _hist
 
-            # ── Oscillation detection ──────────────────────────────────
-            if robot.actionQueue and len(_hist) >= 6 and robot.pathAge >= 4:
-                _a, _b, _c, _d, _e, _f = _hist[-6:]
-                _abab = ((_a == _c == _e) and (_b == _d == _f)
-                         and (_a != _b))
-                _cluster = (len(set(_hist[-6:])) <= 2
-                            and robot.blockedTicks >= 6)
-                if (_abab or _cluster) and robot.replanCooldownTicks <= 0:
-                    _goal = list(robot.actionQueue[0][0])
-                    self._compute_robot_path(i, _goal, cooldown_ticks=6)
-                    robot.velocity = min(robot.velocity, 0.08)
-                    robot.movementProgress = 0.0
-                    _log.debug(
-                        'oscillation replan: robot#%d at %s',
-                        robot.robotNumber, list(robot.xyLocation))
-
+            self._robot_detect_oscillation(i)
             _occupied.add(tuple(robot.xyLocation))
 
         return self.robots
+
+    def _robot_consume_waypoints(self, i):
+        """Pop already-reached waypoints and set immediate movement target."""
+        robot = self.robots[i]
+        while robot.path:
+            if (int(robot.path[0][0]) == int(robot.xyLocation[0])
+                    and int(robot.path[0][1]) == int(robot.xyLocation[1])):
+                robot.path.pop(0)
+                if robot.pathPlan:
+                    robot.pathPlan.pop(0)
+            else:
+                break
+        if robot.path:
+            robot.xyLocationTarget = list(robot.path[0])
+        elif robot.actionQueue:
+            robot.xyLocationTarget = [int(robot.actionQueue[0][0][0]),
+                                      int(robot.actionQueue[0][0][1])]
+
+    def _robot_step_movement(self, i, _occupied, _w, _h):
+        """Compute desired speed, attempt one movement step, handle collisions.
+
+        Returns True if the robot successfully moved this tick.
+        """
+        robot = self.robots[i]
+        _moved = False
+        _cx = int(robot.xyLocation[0])
+        _cy = int(robot.xyLocation[1])
+        _tx = int(robot.xyLocationTarget[0])
+        _ty = int(robot.xyLocationTarget[1])
+
+        # Step direction: unit-clamped toward target cell
+        _dx = max(-1, min(1, _tx - _cx))
+        _dy = max(-1, min(1, _ty - _cy))
+        _step_angle = (math.degrees(math.atan2(_dy, _dx))
+                       if (_dx or _dy)
+                       else float(robot.direction))
+
+        # Heading (snap to step direction for display)
+        robot.direction = round(_step_angle, 2)
+        robot.targetDirection = robot.direction
+        robot.degrees = round(robot.direction)
+        robot.xyLocationDiff = [_dx, _dy]
+        _cardinal = Functions.find_cardinal(robot.degrees)
+        robot.cardinal = _cardinal
+        robot.lastCardinal = _cardinal
+
+        # Desired speed
+        _desired = float(robot.maxVelocity)
+        if robot.carrying != -1:
+            _desired *= ROBOT_CARRY_SPEED_PENALTY
+
+        # Tiered speed based on road tier and zone
+        _road_tier = self.road_map[_cy, _cx]
+        if _road_tier >= 2:           # collector / arterial: full speed
+            pass
+        elif _road_tier == 1:         # branch road: slight slowdown
+            _desired *= 0.85
+        elif self.zoneMap[_cy, _cx] == 0:  # neutral corridor, no road
+            _desired *= 0.70
+        else:                         # inside zone, no road (shelves)
+            _desired *= 0.35
+
+        # Battery limp mode
+        _lt = self._limp_mode_batt_pct
+        if robot.batteryPercent < _lt:
+            _desired = min(
+                _desired,
+                0.25 + 0.75 * max(robot.batteryPercent, 0)
+                / max(_lt, 1))
+
+        # Approach braking
+        _brake_pt = list(robot.xyLocationTarget)
+        if robot.actionQueue:
+            _brake_pt = robot.actionQueue[0][0]
+        elif robot.pathTarget:
+            _brake_pt = robot.pathTarget
+        _dist_goal = max(
+            abs(int(_brake_pt[0]) - _cx),
+            abs(int(_brake_pt[1]) - _cy))
+        if _dist_goal <= 1:
+            _desired = min(_desired, float(robot.minMovingVelocity))
+        elif _dist_goal <= 3:
+            _desired = min(_desired, float(robot.maxVelocity) * 0.5)
+
+        # Pre-computed speed envelope (corners, accel, decel)
+        if robot.pathPlan:
+            _desired = min(
+                _desired,
+                robot.pathPlan[0].get('speed', _desired))
+
+        # Velocity smoothing
+        robot.desiredVelocity = round(_desired, 3)
+        if robot.velocity < _desired:
+            robot.velocity = min(
+                _desired,
+                robot.velocity + robot.accelerationRate)
+        else:
+            robot.velocity = max(
+                _desired,
+                robot.velocity - robot.decelerationRate)
+        if (_desired > 0
+                and 0 < robot.velocity < robot.minMovingVelocity - 1e-6):
+            robot.velocity = robot.minMovingVelocity
+
+        # Movement step
+        _diagonal = (_dx != 0 and _dy != 0)
+        _step_cost = 1.414 if _diagonal else 1.0
+        robot.movementProgress += robot.velocity
+        if robot.movementProgress >= _step_cost and (_dx or _dy):
+            _nx, _ny = _cx + _dx, _cy + _dy
+            _nc = (_nx, _ny)
+
+            if not (0 <= _nx < _w and 0 <= _ny < _h):
+                robot.movementProgress = 0.0
+                robot.blockedTicks += 1
+            elif _nc in _occupied:
+                _blocker = None
+                for _other in self.robots:
+                    if (int(_other.xyLocation[0]) == _nx
+                            and int(_other.xyLocation[1]) == _ny):
+                        _blocker = _other
+                        break
+                _head_on = False
+                if _blocker is not None:
+                    _bdx = int(_blocker.xyLocationDiff[0])
+                    _bdy = int(_blocker.xyLocationDiff[1])
+                    if (_dx + _bdx == 0 and _dy + _bdy == 0
+                            and (_bdx or _bdy)):
+                        _head_on = True
+                if _head_on and robot.robotNumber < _blocker.robotNumber:
+                    _perps = [(-_dy, _dx), (_dy, -_dx)]
+                    for _pdx, _pdy in _perps:
+                        _sx, _sy = _cx + _pdx, _cy + _pdy
+                        if (0 <= _sx < _w and 0 <= _sy < _h
+                                and (_sx, _sy) not in _occupied):
+                            robot.xyLocation[0] = _sx
+                            robot.xyLocation[1] = _sy
+                            _occupied.add((_sx, _sy))
+                            robot.movementProgress -= _step_cost
+                            robot.blockedTicks = 0
+                            _moved = True
+                            if robot.replanCooldownTicks <= 0:
+                                _goal = (list(robot.actionQueue[0][0])
+                                         if robot.actionQueue
+                                         else list(robot.xyLocationTarget))
+                                self._compute_robot_path(i, _goal, cooldown_ticks=4)
+                            break
+                    if not _moved:
+                        robot.velocity = max(
+                            0.0, robot.velocity - robot.decelerationRate)
+                        robot.movementProgress = min(
+                            robot.movementProgress, 0.35)
+                        robot.blockedTicks += 1
+                else:
+                    robot.velocity = max(
+                        0.0, robot.velocity - robot.decelerationRate)
+                    robot.movementProgress = min(
+                        robot.movementProgress, 0.35)
+                    robot.blockedTicks += 1
+            else:
+                robot.xyLocation[0] = _nx
+                robot.xyLocation[1] = _ny
+                _occupied.add(_nc)
+                robot.movementProgress -= _step_cost
+                robot.blockedTicks = 0
+                _moved = True
+
+                while robot.path:
+                    if (int(robot.path[0][0]) == _nx
+                            and int(robot.path[0][1]) == _ny):
+                        robot.path.pop(0)
+                        if robot.pathPlan:
+                            robot.pathPlan.pop(0)
+                    else:
+                        break
+                if robot.path:
+                    robot.xyLocationTarget = list(robot.path[0])
+                elif robot.actionQueue:
+                    robot.xyLocationTarget = [int(robot.actionQueue[0][0][0]),
+                                              int(robot.actionQueue[0][0][1])]
+                if robot.xyLocation == robot.xyLocationTarget:
+                    robot.movementProgress = 0.0
+        else:
+            robot.blockedTicks += 1
+
+        return _moved
+
+    def _robot_recover_stuck(self, i, _occupied, _w, _h):
+        """Try to unstick a blocked robot via local sidestep, waypoint skip, or replan."""
+        robot = self.robots[i]
+        _cx = int(robot.xyLocation[0])
+        _cy = int(robot.xyLocation[1])
+        _tx = int(robot.xyLocationTarget[0])
+        _ty = int(robot.xyLocationTarget[1])
+        _bt = robot.blockedTicks
+        _has_path = bool(robot.path)
+        _moved = False
+
+        # Path drift: next waypoint is far → path is stale
+        if (_has_path
+                and max(abs(int(robot.path[0][0]) - _cx),
+                        abs(int(robot.path[0][1]) - _cy)) > 2
+                and robot.replanCooldownTicks <= 0):
+            _goal = (list(robot.actionQueue[0][0])
+                     if robot.actionQueue
+                     else list(robot.xyLocationTarget))
+            self._compute_robot_path(i, _goal, cooldown_ticks=6)
+            _has_path = bool(robot.path)
+
+        # Local unstick: try any free neighbour closer to target
+        if _bt >= 12:
+            _target_d = max(abs(_tx - _cx), abs(_ty - _cy))
+            _best_uc = None
+            _best_ud = _target_d
+            for _udx, _udy in ((1,0),(1,1),(0,1),(-1,1),
+                                (-1,0),(-1,-1),(0,-1),(1,-1)):
+                _ux, _uy = _cx + _udx, _cy + _udy
+                if not (0 <= _ux < _w and 0 <= _uy < _h):
+                    continue
+                if (_ux, _uy) in _occupied:
+                    continue
+                _ud = max(abs(_tx - _ux), abs(_ty - _uy))
+                if _ud < _best_ud:
+                    _best_ud = _ud
+                    _best_uc = (_ux, _uy)
+            if _best_uc:
+                _sd = math.degrees(math.atan2(
+                    _best_uc[1] - _cy,
+                    _best_uc[0] - _cx))
+                robot.direction = self._rotate_toward_deg(
+                    float(robot.direction), _sd, 180.0)
+                robot.xyLocation[0] = _best_uc[0]
+                robot.xyLocation[1] = _best_uc[1]
+                _occupied.add(_best_uc)
+                robot.movementProgress = 0.0
+                robot.blockedTicks = 0
+                _moved = True
+
+        # Waypoint skip (need ≥2 so there's a next target)
+        if (not _moved and _bt >= 16
+                and _has_path and len(robot.path) >= 2):
+            robot.path.pop(0)
+            if robot.pathPlan:
+                robot.pathPlan.pop(0)
+            robot.xyLocationTarget = list(robot.path[0])
+            robot.blockedTicks = 0
+            _log.debug(
+                'waypoint skip: robot#%d -> now %s',
+                robot.robotNumber, robot.xyLocationTarget)
+
+        # Full replan
+        _replan_at = 8 if _has_path else 14
+        if (not _moved
+                and _bt >= _replan_at
+                and robot.pathAge >= 4
+                and robot.replanCooldownTicks <= 0
+                and robot.xyLocation != robot.xyLocationTarget):
+            _goal = (list(robot.actionQueue[0][0])
+                     if robot.actionQueue
+                     else list(robot.xyLocationTarget))
+            self._compute_robot_path(i, _goal, cooldown_ticks=6)
+            _log.debug(
+                'replan: robot#%d blocked=%d at %s',
+                robot.robotNumber, _bt,
+                list(robot.xyLocation))
+
+    def _robot_detect_oscillation(self, i):
+        """Check recent location history for ABAB patterns and replan if needed."""
+        robot = self.robots[i]
+        _hist = list(robot.recentLocations)
+        if robot.actionQueue and len(_hist) >= 6 and robot.pathAge >= 4:
+            _a, _b, _c, _d, _e, _f = _hist[-6:]
+            _abab = ((_a == _c == _e) and (_b == _d == _f)
+                     and (_a != _b))
+            _cluster = (len(set(_hist[-6:])) <= 2
+                        and robot.blockedTicks >= 6)
+            if (_abab or _cluster) and robot.replanCooldownTicks <= 0:
+                _goal = list(robot.actionQueue[0][0])
+                self._compute_robot_path(i, _goal, cooldown_ticks=6)
+                robot.velocity = min(robot.velocity, 0.08)
+                robot.movementProgress = 0.0
+                _log.debug(
+                    'oscillation replan: robot#%d at %s',
+                    robot.robotNumber, list(robot.xyLocation))
     
     def update_robots_charging(self):
         for i in range(len(self.robots)):
-            if self.robots[i].actionQueue:
-                if (self.robots[i].status == "move to charging station"):
-                    robotTargetLocation = self.robots[i].actionQueue[0][0]
-                    _cs_matches = [x for x in self.chargers if x.xyLocation == robotTargetLocation]
-                    if not _cs_matches:
-                        continue  # charger moved or removed; skip safely
-                    chargingStation = _cs_matches[0]
-                    chargingStationNumber = chargingStation.chargerNumber
-                    chargingStationLocation = chargingStation.xyLocation
-                    chargingStationIndex = [i for i, x in enumerate(self.chargers) if x.chargerNumber == chargingStationNumber][0]
-                    if (self.robots[i].xyLocation == chargingStationLocation): # Just arriving at charging station
-                        if not self._robot_is_stopped(self.robots[i]):
-                            self.robots[i].desiredVelocity = 0.0
-                            continue
-                        _occupied_by_other = any(
-                            (ri != i and tuple(self.robots[ri].xyLocation) == tuple(chargingStationLocation))
-                            for ri in range(len(self.robots))
-                        )
-                        if _occupied_by_other:
-                            # Charger cell is physically occupied; keep waiting without overlap.
-                            continue
-                        if chargingStation.status == "charging":
-                            # Another robot beat us to this charger; pop our task and let
-                            # checkBattery re-assign us to a different charger next tick.
-                            self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, "move to charging station")
-                        else:
-                            self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_replace_task(i, "move to charging station", chargingStationLocation, "charging")
-                            self.chargers[chargingStationIndex].status = "charging"
-                            self.robots[i].stallTicks = 40  # 1-second pause on charger engage
-                            self.robots[i].hasCharged = True
-                elif (self.robots[i].status == "charging"):
-                    robotTargetLocation = self.robots[i].actionQueue[0][0]
-                    _cs_matches = [x for x in self.chargers if x.xyLocation == robotTargetLocation]
-                    if not _cs_matches:
-                        continue  # charger moved or removed; skip safely
-                    chargingStation = _cs_matches[0]
-                    chargingStationNumber = chargingStation.chargerNumber
-                    chargingStationLocation = chargingStation.xyLocation
-                    chargingStationIndex = [i for i, x in enumerate(self.chargers) if x.chargerNumber == chargingStationNumber][0]
-                    if (self.robots[i].xyLocation == chargingStationLocation):
-                        if self.robots[i].batteryPercent <= 98: # Charge
-                            self.robots[i].batteryPercent = round(self.robots[i].batteryPercent + self.robots[i].batteryChargingRate, 1)
-                        else: # Just leaving charging station
-                            self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, "charging")
-                            self.chargers[chargingStationIndex].status = "idle"
-                            self.robots[i].stallTicks = 40  # 1-second pause on charger disengage
+            if not self.robots[i].actionQueue:
+                continue
+            status = self.robots[i].status
+            if status == "move to charging station":
+                self._robot_dock_charger(i)
+            elif status == "charging":
+                self._robot_charge_tick(i)
         return self.robots, self.robotsTaskAssignmentList, self.robotsLog, self.chargers
+
+    def _find_charger_at(self, location):
+        """Return (charger, index) for the charger at *location*, or (None, -1)."""
+        for ci, c in enumerate(self.chargers):
+            if c.xyLocation == location:
+                return c, ci
+        return None, -1
+
+    def _rebuild_entity_indices(self):
+        """Rebuild O(1) lookup dicts for robots and packages."""
+        self._robot_idx = {r.robotNumber: i for i, r in enumerate(self.robots)}
+        self._pkg_idx = {p.packageNumber: i for i, p in enumerate(self.packages)}
+
+    def _find_robot(self, robot_number):
+        """Return index of robot with given robotNumber, or None.  O(1) amortised."""
+        idx = getattr(self, '_robot_idx', {}).get(robot_number)
+        if idx is not None and idx < len(self.robots) and self.robots[idx].robotNumber == robot_number:
+            return idx
+        self._robot_idx = {r.robotNumber: i for i, r in enumerate(self.robots)}
+        return self._robot_idx.get(robot_number)
+
+    def _find_package(self, package_number):
+        """Return index of package with given packageNumber, or None.  O(1) amortised."""
+        idx = getattr(self, '_pkg_idx', {}).get(package_number)
+        if idx is not None and idx < len(self.packages) and self.packages[idx].packageNumber == package_number:
+            return idx
+        self._pkg_idx = {p.packageNumber: i for i, p in enumerate(self.packages)}
+        return self._pkg_idx.get(package_number)
+
+    def _set_package_idle(self, pkg, location=None):
+        """Atomically reset a package to a clean idle state.
+
+        Sets status, carrier, areaTarget, and target location together so a
+        package can never end up 'idle' with a stale plan still attached
+        (the 'zombie idle' state). ``location`` defaults to the package's
+        current xyLocation; pass an override (e.g. dropping robot's cell)
+        to relocate the package in the same operation.
+        """
+        try:
+            pkg.status = 'idle'
+            pkg.carrier = -1
+            pkg.areaTarget = 'none'
+            if location is not None:
+                pkg.xyLocation = list(location)
+            pkg.xyLocationTarget = list(pkg.xyLocation)
+        except Exception:
+            _log.exception('_set_package_idle failed for pkg#%s',
+                           getattr(pkg, 'packageNumber', '?'))
+
+    def _robot_dock_charger(self, i):
+        """Handle a robot arriving at its target charging station."""
+        robot = self.robots[i]
+        target_loc = robot.actionQueue[0][0]
+        charger, ci = self._find_charger_at(target_loc)
+        if charger is None:
+            return  # charger moved or removed; skip safely
+        if robot.xyLocation != charger.xyLocation:
+            return  # not there yet
+        if not self._robot_is_stopped(robot):
+            robot.desiredVelocity = 0.0
+            return
+        # Check if another robot is physically on the charger cell
+        if any(ri != i and tuple(self.robots[ri].xyLocation) == tuple(charger.xyLocation)
+               for ri in range(len(self.robots))):
+            return  # occupied; wait
+        if charger.status == "charging":
+            # Another robot beat us; pop and let checkBattery re-assign next tick
+            self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, "move to charging station")
+        else:
+            self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_replace_task(i, "move to charging station", charger.xyLocation, "charging")
+            self.chargers[ci].status = "charging"
+            robot.stallTicks = STALL_TICKS
+            robot.hasCharged = True
+
+    def _robot_charge_tick(self, i):
+        """Increment battery while docked; undock when full."""
+        robot = self.robots[i]
+        target_loc = robot.actionQueue[0][0]
+        charger, ci = self._find_charger_at(target_loc)
+        if charger is None:
+            return  # charger moved or removed; skip safely
+        if robot.xyLocation != charger.xyLocation:
+            return
+        if robot.batteryPercent <= BATTERY_FULL_PCT:
+            robot.batteryPercent = round(robot.batteryPercent + robot.batteryChargingRate, 1)
+        else:
+            self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, "charging")
+            self.chargers[ci].status = "idle"
+            robot.stallTicks = STALL_TICKS
 
     def update_robots_target_reached(self):
         for i in range(len(self.robots)):
@@ -2478,8 +2693,7 @@ class Warehouse:
                         # (an idle package already sitting at the dropoff cell would fool a
                         # location-based search and block the carried→dropoff transition).
                         _carrying = self.robots[i].carrying
-                        packageIndex = next((y for y, x in enumerate(self.packages)
-                                            if x.packageNumber == _carrying), None)
+                        packageIndex = self._find_package(_carrying)
                         if packageIndex is not None:
                             packageLocation = self.packages[packageIndex].xyLocation
                             packageLocationTarget = self.packages[packageIndex].xyLocationTarget
@@ -2509,50 +2723,62 @@ class Warehouse:
                     if not self._robot_is_stopped(self.robots[i]):
                         self.robots[i].desiredVelocity = 0.0
                         continue
-                    robotNumber = self.robots[i].robotNumber
-                    if (self.robots[i].actionQueue[0][0] == currentLocation) and (self.robots[i].actionQueue[0][1] == "pick up target package"):
-                        packageIndex = [y for y, x in enumerate(self.packages) if x.xyLocation == currentLocation]
-                        if packageIndex:
-                            packageIndex = packageIndex[0]
-                            packageNumber = self.packages[packageIndex].packageNumber
-                            packageLocationTarget = self.packages[packageIndex].xyLocationTarget
-                            if (self.robots[i].status != "carried") and (self.packages[packageIndex].status != "carried"):
-                                # Block pickup if battery too low — robot can't reliably deliver
-                                if self.robots[i].batteryPercent < self._work_min_batt_pct:
-                                    self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, "pick up target package")
-                                    _log.info('pickup blocked: robot#%d batt=%.1f%% too low for pkg#%d',
-                                              self.robots[i].robotNumber, self.robots[i].batteryPercent, packageNumber)
-                                    continue
-                                self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_replace_task(i, "pick up target package", packageLocationTarget, "move to target dropoff location")
-                                self.robots[i].carrying = packageNumber
-                                self.robots[i].stallTicks = 40  # 1-second pause on pickup
-                                self.robots[i].hasCarried = True
-                                self.packages[packageIndex].status = "carried"
-                                self.packages[packageIndex].carrier = robotNumber
-                                _log.debug('pickup: robot#%d picked pkg#%d at %s -> dropoff %s',
-                                           robotNumber, packageNumber, list(currentLocation), list(packageLocationTarget))
-
-                    elif (self.robots[i].actionQueue[0][0] == currentLocation) and (self.robots[i].actionQueue[0][1] == "drop off target package"):
-                        # Find the package being dropped off by robot.carrying, not by
-                        # xyLocationTarget — an idle package previously dropped at the
-                        # same export cell may share the same target coord and would
-                        # be found first by a location search.
-                        _carrying = self.robots[i].carrying
-                        packageIndex = next((y for y, x in enumerate(self.packages)
-                                            if x.packageNumber == _carrying), None)
-                        if packageIndex is not None:
-                            packageNumber = self.packages[packageIndex].packageNumber
-                            packageLocationTarget = self.packages[packageIndex].xyLocationTarget
-                            if (self.robots[i].status != "carried") and (self.packages[packageIndex].status == "carried"):
-                                self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, "drop off target package")
-                                self.robots[i].carrying = -1
-                                self.robots[i].stallTicks = 40  # 1-second pause on dropoff
-                                self.packagesMoveList, self.packagesMovingList, self.packages, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount = self.package_dropoff(packageNumber)
-                                _log.debug('dropoff: robot#%d dropped pkg#%d at %s  area=%s',
-                                           self.robots[i].robotNumber, packageNumber, list(currentLocation),
-                                           self.packages[next((y for y, x in enumerate(self.packages) if x.packageNumber == packageNumber), -1)].area if any(x.packageNumber == packageNumber for x in self.packages) else 'exported')
+                    action = self.robots[i].actionQueue[0][1]
+                    if action == "pick up target package" and self.robots[i].actionQueue[0][0] == currentLocation:
+                        self._robot_do_pickup(i)
+                    elif action == "drop off target package" and self.robots[i].actionQueue[0][0] == currentLocation:
+                        self._robot_do_dropoff(i)
         
         return self.packages, self.packagesMoveList, self.packagesMovingList, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount, self.robots, self.robotsTaskAssignmentList, self.robotsLog
+
+    def _robot_do_pickup(self, i):
+        """Execute package pickup: battery check, grab, set carrier, stall."""
+        robot = self.robots[i]
+        currentLocation = robot.xyLocation
+        robotNumber = robot.robotNumber
+        packageIndex = [y for y, x in enumerate(self.packages) if x.xyLocation == currentLocation]
+        if not packageIndex:
+            return
+        packageIndex = packageIndex[0]
+        pkg = self.packages[packageIndex]
+        packageNumber = pkg.packageNumber
+        packageLocationTarget = pkg.xyLocationTarget
+        if robot.status == "carried" or pkg.status == "carried":
+            return
+        # Block pickup if battery too low — robot can't reliably deliver
+        if robot.batteryPercent < self._work_min_batt_pct:
+            self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, "pick up target package")
+            _log.info('pickup blocked: robot#%d batt=%.1f%% too low for pkg#%d',
+                      robotNumber, robot.batteryPercent, packageNumber)
+            return
+        self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_replace_task(i, "pick up target package", packageLocationTarget, "move to target dropoff location")
+        robot.carrying = packageNumber
+        robot.stallTicks = STALL_TICKS
+        robot.hasCarried = True
+        pkg.status = "carried"
+        pkg.carrier = robotNumber
+        _log.debug('pickup: robot#%d picked pkg#%d at %s -> dropoff %s',
+                   robotNumber, packageNumber, list(currentLocation), list(packageLocationTarget))
+
+    def _robot_do_dropoff(self, i):
+        """Execute package dropoff: release carrier, stall, clean up move lists."""
+        robot = self.robots[i]
+        currentLocation = robot.xyLocation
+        _carrying = robot.carrying
+        packageIndex = self._find_package(_carrying)
+        if packageIndex is None:
+            return
+        pkg = self.packages[packageIndex]
+        packageNumber = pkg.packageNumber
+        if robot.status == "carried" or pkg.status != "carried":
+            return
+        self.robots[i], self.robotsTaskAssignmentList, self.robotsLog = self.robot_pop_task(i, "drop off target package")
+        robot.carrying = -1
+        robot.stallTicks = STALL_TICKS
+        self.packagesMoveList, self.packagesMovingList, self.packages, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount = self.package_dropoff(packageNumber)
+        _log.debug('dropoff: robot#%d dropped pkg#%d at %s  area=%s',
+                   robot.robotNumber, packageNumber, list(currentLocation),
+                   self.packages[self._find_package(packageNumber)].area if self._find_package(packageNumber) is not None else 'exported')
     
     def package_find_carrier_robotNumber(self, packageNumber):
         robotIndex = [i for i, x in enumerate(self.robots) if x.carrying == packageNumber]
@@ -2577,7 +2803,7 @@ class Warehouse:
         if packageNumber in self.packagesMovingList:
             self.packagesMovingList.remove(packageNumber)
         # Update Planned Counts
-        packageIndex = [i for i, x in enumerate(self.packages) if x.packageNumber == packageNumber][0]
+        packageIndex = self._find_package(packageNumber)
         if self.packages[packageIndex].areaTarget == "import":
             self.packagesPlannedInImportCount -= 1
         elif self.packages[packageIndex].areaTarget == "storage":
@@ -2588,7 +2814,7 @@ class Warehouse:
         self.packages[packageIndex].status = "idle"
         self.packages[packageIndex].areaTarget = "none"
         self.packages[packageIndex].carrier = -1
-        self.packages[packageIndex].deliveredAt = time.time()
+        self.packages[packageIndex].deliveredAt = self._sim_time
         return self.packagesMoveList, self.packagesMovingList, self.packages, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount
 
     def robot_insert_task(self, robotIndex, robotNewActionIndex, robotNewLocation, robotNewAction):

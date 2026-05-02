@@ -1,7 +1,7 @@
 """CSV data loaders for item catalogues and address lists."""
 import csv
-from data.item import *
-from data.address import *
+from data.item import Item
+from data.address import Address
 
 
 class Importer:
