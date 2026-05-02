@@ -23,6 +23,7 @@ from data.paint.map_importer import MapImporter
 from data.paint.warehouse_optimizer import WarehouseOptimizer
 from data.paint.zone_strategy import ZoneStrategy
 from data.ui.formatters import fmt_age, fmt_elapsed, fmt_n, fmt_rate
+from data.ui.info_panel import draw_info_panel
 from data.ui.layout import PanelGeometry, horizontal_button_layout
 from data.ui.presenter import FleetSnapshot, build_fleet_snapshot
 from data.ui.styles import (
@@ -1506,7 +1507,6 @@ class MainGame:
 
     def _draw_info_panel(self, composite, mw, mh, sw, sh, ph, cw, stats_lines, now_t, fleet):
         """Render the four-column info panel (ROBOTS / CHARGERS / SIM STATS / PACKAGES)."""
-        from data.ui.info_panel import draw_info_panel
         draw_info_panel(
             composite, mw, mh, sw, sh, ph, cw, stats_lines, now_t, fleet,
             self.warehouse,

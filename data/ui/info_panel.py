@@ -204,7 +204,6 @@ def draw_info_panel(composite, mw, mh, sw, sh, ph, cw,
 
     # ────────────── CHARGERS ──────────────
     _nc = len(wh.chargers)
-    _n_busy = sum(1 for c in wh.chargers if c.status != 'idle')
     put("CHARGERS ({})".format(_nc), col_w + pad_x, _hdr_y, white)
     _pp_mode = getattr(wh, '_power_policy_mode', 'balanced')
     _pp_style = POWER_POLICY_STYLE.get(_pp_mode, POWER_POLICY_STYLE['balanced'])
