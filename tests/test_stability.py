@@ -528,7 +528,7 @@ class TestLongRunWithLightweightInvariants:
 
     def test_500_ticks_clean(self, caplog):
         w = _make_real_warehouse()
-        with caplog.at_level('ERROR', logger='data.warehouse.warehouse'):
+        with caplog.at_level('ERROR', logger='warehouse'):
             for _ in range(500):
                 w.update_warehouse()
         # No INVARIANT-LITE error messages should fire under normal operation

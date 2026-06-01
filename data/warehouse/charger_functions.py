@@ -10,14 +10,15 @@ _log = logging.getLogger(__name__)
 class Charger_Functions:
     """Helpers for spawning charging stations onto the warehouse perimeter."""
 
-    def import_charger(self, chargerLocationsAvailableMap, chargersRollingCount, chargersMaxQuantity, chargersInWarehouse, chargers, packagesInWarehouse):
+    @staticmethod
+    def import_charger(chargerLocationsAvailableMap, chargersRollingCount, chargersMaxQuantity, chargersInWarehouse, chargers, packagesInWarehouse):
         """Attempt to spawn one new charger on the inner perimeter if capacity allows."""
         if chargersRollingCount < chargersMaxQuantity:
             # Search for adequate spawn area
-            xyLocation = self.try_chargerTargetLocation(chargerLocationsAvailableMap, chargersInWarehouse, packagesInWarehouse)
+            xyLocation = Charger_Functions.try_chargerTargetLocation(chargerLocationsAvailableMap, chargersInWarehouse, packagesInWarehouse)
             # Generate charger
             if (xyLocation):
-                charger = self.generate_charger(xyLocation, chargersRollingCount)
+                charger = Charger_Functions.generate_charger(xyLocation, chargersRollingCount)
                 chargers.append(charger)
                 chargersRollingCount += 1
             else:

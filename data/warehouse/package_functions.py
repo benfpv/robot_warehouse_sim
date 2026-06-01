@@ -10,13 +10,14 @@ from data.constants import ZONE_NONE, ZONE_IMPORT, ZONE_STORAGE, ZONE_EXPORT, ZO
 class Package_Functions:
     """Helpers for spawning and positioning packages."""
 
-    def import_package(self, zoneMap, chargersInWarehouse, packagesRollingCount, packagesInImportCount, packagesInWarehouseCount, packagesInWarehouse, packageTargetsInWarehouse, packagesMaxQuantity, packages, packagesLog, itemsList, addressesList, datetimeNow, spawnZoneId=ZONE_IMPORT):
+    @staticmethod
+    def import_package(zoneMap, chargersInWarehouse, packagesRollingCount, packagesInImportCount, packagesInWarehouseCount, packagesInWarehouse, packageTargetsInWarehouse, packagesMaxQuantity, packages, packagesLog, itemsList, addressesList, datetimeNow, spawnZoneId=ZONE_IMPORT):
         """Attempt to spawn one new package in the given zone if capacity allows."""
         if packagesInWarehouseCount < packagesMaxQuantity:
-            movePackage, xyLocation = self.try_packageTargetLocation(zoneMap, spawnZoneId, packagesInWarehouse, packageTargetsInWarehouse, chargersInWarehouse)
+            movePackage, xyLocation = Package_Functions.try_packageTargetLocation(zoneMap, spawnZoneId, packagesInWarehouse, packageTargetsInWarehouse, chargersInWarehouse)
             if (movePackage == True):
                 spawnArea = ZONE_NAMES.get(spawnZoneId, 'neutral')
-                package = self.generate_package(xyLocation, itemsList, addressesList, packagesRollingCount, area=spawnArea)
+                package = Package_Functions.generate_package(xyLocation, itemsList, addressesList, packagesRollingCount, area=spawnArea)
                 packages.append(package)
                 packagesLog.append(Packages_Log(packagesRollingCount, package, 'import', datetimeNow))
                 packagesRollingCount += 1

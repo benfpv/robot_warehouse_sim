@@ -1,7 +1,10 @@
 import cv2
 import numpy as np
+import logging
 
 from data.constants import ZONE_NONE, ZONE_IMPORT, ZONE_STORAGE, ZONE_EXPORT
+
+_log = logging.getLogger('paint')
 
 
 class PaintHandler:
@@ -103,8 +106,8 @@ class PaintHandler:
                 idx = max(0, min(idx, n_strats - 1))
                 s = self.optimizer.strategies[idx]
                 s.enabled = not s.enabled
-                print('[PaintHandler] {} optimizer {}.'.format(
-                    s.name, 'ON' if s.enabled else 'OFF'))
+                _log.info('%s optimizer %s.',
+                          s.name, 'ON' if s.enabled else 'OFF')
             return
 
         # ── Zone button strip click (full-width bottom strip) ─────────
@@ -193,23 +196,23 @@ class PaintHandler:
                 self.warehouse.pending_zone_changes = {
                     (x, y) for y in range(gh) for x in range(gw)
                 }
-                print("[PaintHandler] Zone map hot-reloaded from 'resources/zone_map.png'.")
+                _log.info("Zone map hot-reloaded from 'resources/zone_map.png'.")
             # Charger spawn map
             _charger_coords = MapImporter.load_spawn_map("resources/charger_map.png", gw, gh)
             if _charger_coords:
                 self.warehouse.chargerSpawnMap = _charger_coords
-                print("[PaintHandler] Charger spawn map hot-reloaded ({} cells).".format(
-                    len(_charger_coords)))
+                _log.info("Charger spawn map hot-reloaded (%d cells).",
+                          len(_charger_coords))
             # Robot spawn map
             _robot_coords = MapImporter.load_spawn_map("resources/robot_map.png", gw, gh)
             if _robot_coords:
                 self.warehouse.robotSpawnMap = _robot_coords
-                print("[PaintHandler] Robot spawn map hot-reloaded ({} cells).".format(
-                    len(_robot_coords)))
+                _log.info("Robot spawn map hot-reloaded (%d cells).",
+                          len(_robot_coords))
             # Reset optimizer (recompute zonable mask from new spawn maps)
             if self.optimizer:
                 self.optimizer.reset(self.warehouse)
-                print("[PaintHandler] Optimizer strategies reset.")
+                _log.info("Optimizer strategies reset.")
             return True
         return False
 

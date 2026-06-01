@@ -19,14 +19,15 @@ def try_spawn_location(available_map, grid_a, grid_b, max_attempts=3):
 class Robot_Functions:
     """Helpers for spawning robots onto the warehouse perimeter."""
 
-    def import_robot(self, robotSpawnLocationsAvailableMap, robotsRollingCount, robotsInWarehouseCount, robotsMaxQuantity, robotsInWarehouse, robots, robotsTaskAssignmentList, chargersInWarehouse):
+    @staticmethod
+    def import_robot(robotSpawnLocationsAvailableMap, robotsRollingCount, robotsInWarehouseCount, robotsMaxQuantity, robotsInWarehouse, robots, robotsTaskAssignmentList, chargersInWarehouse):
         """Attempt to spawn one new robot on the outer perimeter if capacity allows."""
         if robotsRollingCount < robotsMaxQuantity:
             # Search for adequate spawn area
-            xyLocation = self.try_robotTargetLocation(robotSpawnLocationsAvailableMap, robotsInWarehouse, chargersInWarehouse)
+            xyLocation = Robot_Functions.try_robotTargetLocation(robotSpawnLocationsAvailableMap, robotsInWarehouse, chargersInWarehouse)
             # Generate robot
             if (xyLocation):
-                robot = self.generate_robot(xyLocation, robotsRollingCount)
+                robot = Robot_Functions.generate_robot(xyLocation, robotsRollingCount)
                 robots.append(robot)
                 robotsTaskAssignmentList.append([robotsRollingCount, 0])
                 robotsRollingCount += 1

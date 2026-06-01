@@ -29,8 +29,11 @@ Quick-start
 import os
 import cv2
 import numpy as np
+import logging
 
 from data.constants import ZONE_NONE, ZONE_IMPORT, ZONE_STORAGE, ZONE_EXPORT
+
+_log = logging.getLogger('paint')
 
 
 class MapImporter:
@@ -69,7 +72,7 @@ class MapImporter:
         """
         img = cv2.imread(path)
         if img is None:
-            print("[MapImporter] Could not read: {}".format(path))
+            _log.warning("Could not read: %s", path)
             return None
 
         # Scale to grid with nearest-neighbour to preserve painted zone edges
@@ -93,7 +96,7 @@ class MapImporter:
         zone_map[red_mask]   = ZONE_EXPORT   # applied last — red wins on overlap edges
 
         counts = {v: int(np.count_nonzero(zone_map == v)) for v in [1, 2, 3]}
-        print("[MapImporter] Loaded '{}' -> {}x{} grid, slots: {}".format(path, gw, gh, counts))
+        _log.info("Loaded '%s' -> %dx%d grid, slots: %s", path, gw, gh, counts)
         return zone_map
 
     # ── Example PNG generator ──────────────────────────────────────────
@@ -223,8 +226,7 @@ class MapImporter:
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
         cv2.imwrite(path, img)
-        print("[MapImporter] Example PNG written: {}  ({}×{} px)".format(
-            path, cw, ch + legend_h))
+        _log.info("Example PNG written: %s  (%d×%d px)", path, cw, ch + legend_h)
 
     # ── Default zone_map.png generator ────────────────────────────────
 
@@ -269,7 +271,7 @@ class MapImporter:
             os.makedirs(out_dir, exist_ok=True)
         cv2.imwrite(path, img)
         cw2, ch2 = gw * cell_px, gh * cell_px
-        print("[MapImporter] Default map written: {}  ({}×{} px)".format(path, cw2, ch2))
+        _log.info("Default map written: %s  (%d×%d px)", path, cw2, ch2)
 
     # ── Sunflower zone map generator ───────────────────────────────────
 
@@ -398,8 +400,8 @@ class MapImporter:
         cv2.imwrite(path, img)
         counts = {v: int(np.count_nonzero(zone_map == v)) for v in [1, 2, 3]}
         cw2, ch2 = gw * cell_px, gh * cell_px
-        print("[MapImporter] Sunflower map written: {}  ({}×{} px), slots: {}".format(
-            path, cw2, ch2, counts))
+        _log.info("Sunflower map written: %s  (%d×%d px), slots: %s",
+                  path, cw2, ch2, counts)
 
     # ── Spiral / black-hole zone map generator ─────────────────────────
 
@@ -478,8 +480,8 @@ class MapImporter:
         cv2.imwrite(path, img)
         counts = {v: int(np.count_nonzero(zone_map == v)) for v in [1, 2, 3]}
         cw2, ch2 = gw * cell_px, gh * cell_px
-        print("[MapImporter] Spiral map written: {}  ({}×{} px), slots: {}".format(
-            path, cw2, ch2, counts))
+        _log.info("Spiral map written: %s  (%d×%d px), slots: %s",
+                  path, cw2, ch2, counts)
 
     # ─────────────────────────────────────────────────────────────────────
     # Spawn-position maps (charger / robot)
@@ -515,7 +517,7 @@ class MapImporter:
         """
         img = cv2.imread(path)
         if img is None:
-            print("[MapImporter] Could not read spawn map: {}".format(path))
+            _log.warning("Could not read spawn map: %s", path)
             return None
 
         img = cv2.resize(img, (gw, gh), interpolation=cv2.INTER_NEAREST)
@@ -527,7 +529,7 @@ class MapImporter:
         ys, xs = np.where(valid_mask)
         coords = [[int(x), int(y)] for x, y in zip(xs, ys)]
 
-        print("[MapImporter] Spawn map '{}' -> {} valid cells".format(path, len(coords)))
+        _log.info("Spawn map '%s' -> %d valid cells", path, len(coords))
         return coords
 
     @classmethod
@@ -585,7 +587,7 @@ class MapImporter:
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
         cv2.imwrite(path, img)
-        print("[MapImporter] Charger-map example written: {}".format(path))
+        _log.info("Charger-map example written: %s", path)
 
     @classmethod
     def generate_robot_map_example(cls, path, gw=80, gh=70, cell_px=8):
@@ -641,7 +643,7 @@ class MapImporter:
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
         cv2.imwrite(path, img)
-        print("[MapImporter] Robot-map example written: {}".format(path))
+        _log.info("Robot-map example written: %s", path)
 
     @classmethod
     def generate_charger_map(cls, path, gw=80, gh=70, cell_px=8):
@@ -665,7 +667,7 @@ class MapImporter:
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
         cv2.imwrite(path, img)
-        print("[MapImporter] Charger map written: {}".format(path))
+        _log.info("Charger map written: %s", path)
 
     @classmethod
     def generate_robot_map(cls, path, gw=80, gh=70, cell_px=8):
@@ -689,4 +691,4 @@ class MapImporter:
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
         cv2.imwrite(path, img)
-        print("[MapImporter] Robot map written: {}".format(path))
+        _log.info("Robot map written: %s", path)

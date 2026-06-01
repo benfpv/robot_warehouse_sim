@@ -78,6 +78,21 @@ def draw_info_panel(composite, mw, mh, sw, sh, ph, cw,
         (tw, _), _ = cv2.getTextSize(text, font, fs, ft)
         return x + tw
 
+    def _draw_policy_button(style, active, bx0, by0, bx1, by1):
+        """Draw one mode-selector button (filled bg + edges + centered label)."""
+        composite[by0:by1, bx0:bx1] = style['bg'] if active else (18, 18, 18)
+        composite[by0:by1, bx0:bx0 + 1] = style['edge'] if active else (42, 42, 42)
+        composite[by0:by1, bx1 - 1:bx1] = style['edge'] if active else (42, 42, 42)
+        composite[by0:by0 + 1, bx0:bx1] = style['edge'] if active else (42, 42, 42)
+        composite[by1 - 1:by1, bx0:bx1] = style['edge'] if active else (42, 42, 42)
+        _label = style['label']
+        _fs_btn = 0.23
+        (_tw, _th), _ = cv2.getTextSize(_label, font, _fs_btn, 1)
+        _tx = bx0 + max((bx1 - bx0 - _tw) // 2, 1)
+        _ty = by0 + (by1 - by0 + _th) // 2
+        cv2.putText(composite, _label, (_tx, _ty), font, _fs_btn,
+                    style['text'] if active else (85, 85, 85), 1)
+
     # ── Pixel geometry ──
     _hdr_y      = mh + 10
     _data_start = mh + 22
@@ -209,19 +224,7 @@ def draw_info_panel(composite, mw, mh, sw, sh, ph, cw,
     _pp_style = POWER_POLICY_STYLE.get(_pp_mode, POWER_POLICY_STYLE['balanced'])
     for mode, bx0, by0, bx1, by1 in power_policy_buttons:
         style = POWER_POLICY_STYLE[mode]
-        active = (mode == _pp_mode)
-        composite[by0:by1, bx0:bx1] = style['bg'] if active else (18, 18, 18)
-        composite[by0:by1, bx0:bx0 + 1] = style['edge'] if active else (42, 42, 42)
-        composite[by0:by1, bx1 - 1:bx1] = style['edge'] if active else (42, 42, 42)
-        composite[by0:by0 + 1, bx0:bx1] = style['edge'] if active else (42, 42, 42)
-        composite[by1 - 1:by1, bx0:bx1] = style['edge'] if active else (42, 42, 42)
-        _label = style['label']
-        _fs_btn = 0.23
-        (_tw, _th), _ = cv2.getTextSize(_label, font, _fs_btn, 1)
-        _tx = bx0 + max((bx1 - bx0 - _tw) // 2, 1)
-        _ty = by0 + (by1 - by0 + _th) // 2
-        cv2.putText(composite, _label, (_tx, _ty), font, _fs_btn,
-                    style['text'] if active else (85, 85, 85), 1)
+        _draw_policy_button(style, mode == _pp_mode, bx0, by0, bx1, by1)
     put("mode: {} ({})".format(_pp_mode.upper(), POWER_POLICY_HINT.get(_pp_mode, _pp_mode)),
         col_w + pad_x, _data_start - 1, _pp_style['text'], max_x=col_w * 2)
     _chg_data_start = _data_start + lh
@@ -310,19 +313,7 @@ def draw_info_panel(composite, mw, mh, sw, sh, ph, cw,
     _fp_style = FLOW_POLICY_STYLE.get(_fp_mode, FLOW_POLICY_STYLE['balanced'])
     for mode, bx0, by0, bx1, by1 in flow_policy_buttons:
         style = FLOW_POLICY_STYLE[mode]
-        active = (mode == _fp_mode)
-        composite[by0:by1, bx0:bx1] = style['bg'] if active else (18, 18, 18)
-        composite[by0:by1, bx0:bx0 + 1] = style['edge'] if active else (42, 42, 42)
-        composite[by0:by1, bx1 - 1:bx1] = style['edge'] if active else (42, 42, 42)
-        composite[by0:by0 + 1, bx0:bx1] = style['edge'] if active else (42, 42, 42)
-        composite[by1 - 1:by1, bx0:bx1] = style['edge'] if active else (42, 42, 42)
-        _label = style['label']
-        _fs_btn = 0.23
-        (_tw, _th), _ = cv2.getTextSize(_label, font, _fs_btn, 1)
-        _tx = bx0 + max((bx1 - bx0 - _tw) // 2, 1)
-        _ty = by0 + (by1 - by0 + _th) // 2
-        cv2.putText(composite, _label, (_tx, _ty), font, _fs_btn,
-                    style['text'] if active else (85, 85, 85), 1)
+        _draw_policy_button(style, mode == _fp_mode, bx0, by0, bx1, by1)
     put("mode: {} ({})".format(_fp_mode.upper(), FLOW_POLICY_HINT.get(_fp_mode, _fp_mode)),
         _sc2 + pad_x, _data_start - 1, _fp_style['text'], max_x=_sc3)
     _sim_data_start = _data_start + lh
@@ -344,19 +335,7 @@ def draw_info_panel(composite, mw, mh, sw, sh, ph, cw,
     _pm_style = PKG_TARGET_STYLE.get(_active_mode, PKG_TARGET_STYLE['random'])
     for mode, bx0, by0, bx1, by1 in pkg_target_buttons:
         style = PKG_TARGET_STYLE[mode]
-        active = (mode == _active_mode)
-        composite[by0:by1, bx0:bx1] = style['bg'] if active else (18, 18, 18)
-        composite[by0:by1, bx0:bx0 + 1] = style['edge'] if active else (42, 42, 42)
-        composite[by0:by1, bx1 - 1:bx1] = style['edge'] if active else (42, 42, 42)
-        composite[by0:by0 + 1, bx0:bx1] = style['edge'] if active else (42, 42, 42)
-        composite[by1 - 1:by1, bx0:bx1] = style['edge'] if active else (42, 42, 42)
-        _label = style['label']
-        _fs_btn = 0.23
-        (_tw, _th), _ = cv2.getTextSize(_label, font, _fs_btn, 1)
-        _tx = bx0 + max((bx1 - bx0 - _tw) // 2, 1)
-        _ty = by0 + (by1 - by0 + _th) // 2
-        cv2.putText(composite, _label, (_tx, _ty), font, _fs_btn,
-                    style['text'] if active else (85, 85, 85), 1)
+        _draw_policy_button(style, mode == _active_mode, bx0, by0, bx1, by1)
     put("mode: {} ({})".format(_active_mode.upper(), _pm_style['hint']),
         col_w * 3 + pad_x, _data_start - 1, _pm_style['text'], max_x=cw)
 

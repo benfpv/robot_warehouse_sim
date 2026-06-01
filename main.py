@@ -14,6 +14,10 @@ import cv2
 
 from data.importer import Importer
 from data.functions import Functions
+from data.constants import (
+    POWER_POLICY_MODES, FLOW_POLICY_MODES, PKG_TARGET_MODES,
+)
+from data.log_setup import configure_logging
 
 from data.warehouse.warehouse import Warehouse
 from data.draw.draw_warehouse import Draw_Warehouse
@@ -32,6 +36,8 @@ from data.ui.styles import (
     PKG_TARGET_STYLE, PKG_TARGET_REASON,
 )
 
+log = logging.getLogger('main')
+
 
 class MainGame:
     """Top-level simulation controller.
@@ -43,12 +49,12 @@ class MainGame:
     (rate-limited display repaint).
     """
     _DISPLAY_FPS_OPTIONS = [30, 60]
-    _POWER_POLICY_MODES = ['eco', 'balanced', 'performance']
-    _FLOW_POLICY_MODES = ['steady', 'balanced', 'throughput']
-    _PKG_TARGET_MODES = ['random', 'nearest', 'zone_edge']
+    _POWER_POLICY_MODES = POWER_POLICY_MODES
+    _FLOW_POLICY_MODES = FLOW_POLICY_MODES
+    _PKG_TARGET_MODES = PKG_TARGET_MODES
 
     def __init__(self):
-        print("--- MainGame Init ---")
+        log.info("--- MainGame Init ---")
         self.timeStart = int(time.time())
         self.exit = False
         self._init_constants()
@@ -118,7 +124,7 @@ class MainGame:
                 self.warehouse.zoneMap = _loaded
                 self.warehouse.zoneMap_original = _loaded.copy()
                 self.warehouse.update_zone_counts()
-                print("[main] Zone map applied from '{}'.".format(_map_path))
+                log.info("Zone map applied from '%s'.", _map_path)
         # Charger spawn map
         _charger_example_path = "resources/charger_map_example.png"
         if not os.path.exists(_charger_example_path):
@@ -129,8 +135,8 @@ class MainGame:
             _charger_coords = MapImporter.load_spawn_map(_charger_map_path, gw, gh)
             if _charger_coords:                          # non-empty list = valid map
                 self.warehouse.chargerSpawnMap = _charger_coords
-                print("[main] Charger spawn map applied from '{}' ({} cells).".format(
-                    _charger_map_path, len(_charger_coords)))
+                log.info("Charger spawn map applied from '%s' (%d cells).",
+                         _charger_map_path, len(_charger_coords))
         # Robot spawn map
         _robot_example_path = "resources/robot_map_example.png"
         if not os.path.exists(_robot_example_path):
@@ -141,8 +147,8 @@ class MainGame:
             _robot_coords = MapImporter.load_spawn_map(_robot_map_path, gw, gh)
             if _robot_coords:
                 self.warehouse.robotSpawnMap = _robot_coords
-                print("[main] Robot spawn map applied from '{}' ({} cells).".format(
-                    _robot_map_path, len(_robot_coords)))
+                log.info("Robot spawn map applied from '%s' (%d cells).",
+                         _robot_map_path, len(_robot_coords))
 
     def initWarehouseWindow(self):
         """Compose-window setup: geometry, history buffers, UI state, OS window."""
@@ -207,8 +213,8 @@ class MainGame:
         cx = (screen_w - self.composite_windowRes[0]) // 2
         cy = (screen_h - self.composite_windowRes[1]) // 2
         Display_Functions.init_borderless_window("warehouse", self.composite_windowRes, [cx, cy])
-        print('- warehouse_res: {}, arrayShape: {}, composite_windowRes: {}, screen_center_pos: [{},{}]'.format(
-            self.warehouse_res, np.shape(self.warehouse_windowArray), self.composite_windowRes, cx, cy))
+        log.info('- warehouse_res: %s, arrayShape: %s, composite_windowRes: %s, screen_center_pos: [%d,%d]',
+                 self.warehouse_res, np.shape(self.warehouse_windowArray), self.composite_windowRes, cx, cy)
 
     # ── Mouse callback ──────────────────────────────────────────────────
 
@@ -232,7 +238,7 @@ class MainGame:
         if fps not in self._DISPLAY_FPS_OPTIONS:
             return
         self.draw_frametime = 1.0 / float(fps)
-        print('[main] Display FPS -> {}'.format(fps))
+        log.info('Display FPS -> %s', fps)
 
     # Backwards-compatible re-exports — delegate to data.ui.layout /
     # data.ui.formatters so existing code paths and tests continue to work.
@@ -254,14 +260,12 @@ class MainGame:
     def _set_power_policy_mode(self, mode):
         if not self.warehouse.set_power_policy_mode(mode):
             return
-        print('[main] Power Policy -> {} ({})'.format(
-            mode, POWER_POLICY_REASON[mode]))
+        log.info('Power Policy -> %s (%s)', mode, POWER_POLICY_REASON[mode])
 
     def _set_flow_policy_mode(self, mode):
         if not self.warehouse.set_flow_policy_mode(mode):
             return
-        print('[main] Flow Policy -> {} ({})'.format(
-            mode, FLOW_POLICY_REASON[mode]))
+        log.info('Flow Policy -> %s (%s)', mode, FLOW_POLICY_REASON[mode])
 
     def _power_policy_button_layout(self):
         mh = self.warehouse_windowRes[1]
@@ -303,8 +307,8 @@ class MainGame:
         if not self.warehouse.set_package_target_mode(mode):
             return
         mode = getattr(self.warehouse, '_pkg_target_mode', mode)
-        print('[main] Package target mode -> {} ({})'.format(
-            mode, PKG_TARGET_REASON.get(mode, 'user override')))
+        log.info('Package target mode -> %s (%s)',
+                 mode, PKG_TARGET_REASON.get(mode, 'user override'))
 
     def _pkg_target_button_layout(self):
         mh = self.warehouse_windowRes[1]
@@ -352,10 +356,10 @@ class MainGame:
                 target = self.warehouse._robot_target_count
                 if action == '+':
                     self.warehouse.set_robot_count(target + 1)
-                    print('[main] Robot target -> {} (+1)'.format(target + 1))
+                    log.info('Robot target -> %d (+1)', target + 1)
                 elif action == '-' and target > 1:
                     self.warehouse.set_robot_count(target - 1)
-                    print('[main] Robot target -> {} (-1)'.format(target - 1))
+                    log.info('Robot target -> %d (-1)', target - 1)
                 return True
         return False
 
@@ -1543,26 +1547,26 @@ def _shutdown(reason=''):
     except Exception:
         pass
     if reason:
-        print('-- Shutdown:', reason, '--')
+        log.info('-- Shutdown: %s --', reason)
 
 
 if __name__ == '__main__':
 
+    configure_logging()
     mainGame = None
     loop_count = 0
-    print('-- Game Loop Start --')
+    log.info('-- Game Loop Start --')
     try:
         mainGame = MainGame()
         while not mainGame.exit:
             mainGame.gameLoop(loop_count)
             loop_count += 1
-        print('-- Game Loop End --')
+        log.info('-- Game Loop End --')
         time.sleep(2)
     except KeyboardInterrupt:
-        print('-- Game Loop Interrupted --')
+        log.info('-- Game Loop Interrupted --')
     except Exception:
-        import traceback
-        traceback.print_exc()
+        log.exception('Unhandled exception in game loop')
         raise
     finally:
         _shutdown()

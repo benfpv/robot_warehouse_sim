@@ -23,17 +23,14 @@ from data.warehouse.warehouse_data import Warehouse_Data
 from data.warehouse.warehouse_log import Robots_Log
 from data.constants import (ZONE_NONE, ZONE_IMPORT, ZONE_STORAGE, ZONE_EXPORT,
                             ZONE_NAMES, SIM_TICK_RATE, STALL_TICKS,
-                            ROBOT_CARRY_SPEED_PENALTY, BATTERY_FULL_PCT)
+                            ROBOT_CARRY_SPEED_PENALTY, BATTERY_FULL_PCT,
+                            POWER_POLICY_MODES, FLOW_POLICY_MODES,
+                            PKG_TARGET_MODES)
 
 # ── Module-level logger ────────────────────────────────────────────────
+# Handlers are attached explicitly by data.log_setup.configure_logging() at
+# application startup.  Importing this module has no filesystem side effects.
 _log = logging.getLogger('warehouse')
-if not _log.handlers:
-    _log.setLevel(logging.DEBUG)
-    _fh = logging.FileHandler('warehouse.log', mode='a', encoding='utf-8')
-    _fh.setLevel(logging.DEBUG)
-    _fh.setFormatter(logging.Formatter('%(asctime)s  %(levelname)-5s  %(message)s', datefmt='%H:%M:%S'))
-    _log.addHandler(_fh)
-    _log.propagate = False
 
 class Warehouse:
     """Core warehouse simulation engine.
@@ -64,9 +61,9 @@ class Warehouse:
         Road network  — Physarum-inspired organic builder (hotspots → MST → tiered roads → plazas)
         Decommission  — graceful robot retirement with perimeter exit
     """
-    _POWER_POLICY_MODES = ('eco', 'balanced', 'performance')
-    _FLOW_POLICY_MODES = ('steady', 'balanced', 'throughput')
-    _PKG_TARGET_MODES = ('random', 'nearest', 'zone_edge')
+    _POWER_POLICY_MODES = POWER_POLICY_MODES
+    _FLOW_POLICY_MODES = FLOW_POLICY_MODES
+    _PKG_TARGET_MODES = PKG_TARGET_MODES
 
     @property
     def _sim_time(self):
@@ -80,7 +77,7 @@ class Warehouse:
                     logsMaxLength=10000, packagesLog=None, robotsLog=None,
                     _debug_invariants=False,
                 ) -> None:
-        print("--- Warehouse Init ---")
+        _log.info("--- Warehouse Init ---")
         # Window Resolution, Window Center
         self.windowRes = windowRes if windowRes is not None else []
         self.windowBackgroundColour = windowBackgroundColour if windowBackgroundColour is not None else []
@@ -1093,7 +1090,7 @@ class Warehouse:
             # Use adaptive import cap instead of raw packagesMaxQuantity
             _effective_cap = min(self._flow_import_cap, self.packagesMaxQuantity)
             _prev_count = len(self.packages)
-            self.packagesRollingCount, self.packagesInImportCount, self.packagesInWarehouseCount, self.packages, self.packagesLog = Package_Functions.import_package(Package_Functions, self.zoneMap, self.chargersInWarehouse, self.packagesRollingCount, self.packagesInImportCount, self.packagesInWarehouseCount, self.packagesInWarehouse, self.packageTargetsInWarehouse, _effective_cap, self.packages, self.packagesLog, self.itemsList, self.addressesList, self.datetimeNow, spawnZoneId=spawnZoneId) # Import package
+            self.packagesRollingCount, self.packagesInImportCount, self.packagesInWarehouseCount, self.packages, self.packagesLog = Package_Functions.import_package(self.zoneMap, self.chargersInWarehouse, self.packagesRollingCount, self.packagesInImportCount, self.packagesInWarehouseCount, self.packagesInWarehouse, self.packageTargetsInWarehouse, _effective_cap, self.packages, self.packagesLog, self.itemsList, self.addressesList, self.datetimeNow, spawnZoneId=spawnZoneId) # Import package
             # Stamp new packages with sim-time
             for _pi in range(_prev_count, len(self.packages)):
                 self.packages[_pi].createdAt = self._sim_time
@@ -1111,8 +1108,6 @@ class Warehouse:
         self.packageTargetsInWarehouse = self.update_packageTargetsInWarehouse()
         self.packages = self.update_packages_colours(self.datetimeNow)
         self.packages, self.packageExportCount, self.packageExportRollingCount = self.package_export()
-
-        return self.packages, self.packagesRollingCount, self.packagesInWarehouseCount, self.packagesLog, self.packageTargetsInWarehouse, self.packageExportCount, self.packageExportRollingCount
 
     def update_packages_timeToDeadline(self, datetimeNow):
         for i in range(len(self.packages)):
@@ -1761,7 +1756,7 @@ class Warehouse:
         self._rebuild_entity_indices()
         # Import Robot
         _prev_robot_count = len(self.robots)
-        self.robotsRollingCount, self.robotsInWarehouseCount, self.robots, self.robotsTaskAssignmentList = Robot_Functions.import_robot(Robot_Functions, self.robotSpawnMap, self.robotsRollingCount, self.robotsInWarehouseCount, self.robotsMaxQuantity, self.robotsInWarehouse, self.robots, self.robotsTaskAssignmentList, self.chargersInWarehouse) # Import Robot
+        self.robotsRollingCount, self.robotsInWarehouseCount, self.robots, self.robotsTaskAssignmentList = Robot_Functions.import_robot(self.robotSpawnMap, self.robotsRollingCount, self.robotsInWarehouseCount, self.robotsMaxQuantity, self.robotsInWarehouse, self.robots, self.robotsTaskAssignmentList, self.chargersInWarehouse) # Import Robot
         # Stamp new robots with sim-time
         for _ri in range(_prev_robot_count, len(self.robots)):
             self.robots[_ri].createdAt = self._sim_time
@@ -1771,13 +1766,11 @@ class Warehouse:
         # Update actionQueue / task assignments
         self.robotsTaskAssignmentList.sort(key=lambda y: y[1], reverse=False) # Sort robotTasksAssignmentList by #tasks
         self.packagesMovingList, self.robots, self.robotsTaskAssignmentList, self.robotsLog = self.update_robots_assign_package_availability() # Assign packagesMoveList to robots by availability
-        #self.robotsTaskAssignmentList.sort(key=lambda y: y[1], reverse=False) # Sort robotTasksAssignmentList by #tasks
         # Update automatically
         self.robots, self.robotsTaskAssignmentList, self.robotsLog, self.chargers = self.update_robots_charging()
         # Update location-contingent logic
         self.robots, self.robotsTaskAssignmentList, self.robotsLog = self.update_robots_target_reached()
         self.packages, self.packagesMoveList, self.packagesMovingList, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount, self.robots, self.robotsTaskAssignmentList, self.robotsLog = self.update_robots_target_labouring()
-        #self.robots = self.update_robots_area() # Update area based on xyLocation, and areaTarget based on target package area.
         # Update xyLocation
         self.robots = self.update_robots_xyLocationTarget()
         self.robots = self.update_robots_xyLocation()
@@ -1796,12 +1789,10 @@ class Warehouse:
         _to_remove = [i for i, r in enumerate(self.robots) if r._pending_removal]
         for i in reversed(_to_remove):
             self._remove_robot(i)
-        return self.packages, self.packagesMoveList, self.packagesMovingList, self.packagesPlannedInImportCount, self.packagesPlannedInStorageCount, self.packagesPlannedInExportCount, self.robots, self.robotsRollingCount, self.robotsTaskAssignmentList, self.robotsLog, self.chargers
 
     def update_chargers(self):
         # Import Charger
-        self.chargersRollingCount, self.chargers = Charger_Functions.import_charger(Charger_Functions, self.chargerSpawnMap, self.chargersRollingCount, self.chargersMaxQuantity, self.chargersInWarehouse, self.chargers, self.packagesInWarehouse)
-        return self.chargers, self.chargersRollingCount, self.chargersInWarehouse
+        self.chargersRollingCount, self.chargers = Charger_Functions.import_charger(self.chargerSpawnMap, self.chargersRollingCount, self.chargersMaxQuantity, self.chargersInWarehouse, self.chargers, self.packagesInWarehouse)
 
     def update_robots_batteryPercent(self):
         # State-aware drain multipliers
@@ -1879,6 +1870,8 @@ class Warehouse:
             _travel_cost_i = self._estimate_charge_travel_cost(
                 robot, self.chargers[_c_tmp].xyLocation)
         _effective_threshold = self._charge_threshold + _travel_cost_i
+        _OPPORTUNISTIC_BATT_PCT = 70     # only top-off below this battery level
+        _OPPORTUNISTIC_PRESSURE_MAX = 0.3  # only when charger contention is low
         if robot.batteryPercent <= _effective_threshold:
             if robot.status != "charging":
                 robotQueuedCharging = [x for x in robot.actionQueue if "move to charging station" in x]
@@ -1895,8 +1888,8 @@ class Warehouse:
                                   chargingStationLocation, _prev_task)
                         self.robotsTaskAssignmentList.sort(key=lambda y: y[1], reverse=False)
         # Opportunistic top-off: idle robots charge proactively when chargers plentiful
-        elif (robot.batteryPercent <= 70
-              and self._charger_pressure < 0.3
+        elif (robot.batteryPercent <= _OPPORTUNISTIC_BATT_PCT
+              and self._charger_pressure < _OPPORTUNISTIC_PRESSURE_MAX
               and robot.status == 'idle'
               and not robot.actionQueue):
             chargerAvailable, c = self.find_available_charger(robot)

@@ -1,3 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robot_warehouse_sim"
+version = "0.1.0"
+description = "A robot warehouse logistics simulation with real-time visualization."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+    "numpy>=1.26.4",
+    "opencv-python>=4.11.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["data*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = [".", "tests"]

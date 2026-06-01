@@ -189,9 +189,16 @@ class WarehouseStub:
 
 
 # Copy real Warehouse methods onto the stub so tests exercise actual logic.
+#
+# Stub contract / drift guard:
+#   The names below MUST exist on the real Warehouse class. They are copied
+#   verbatim so the stub exercises production logic rather than a re-implementation.
+#   If a method is renamed or removed in warehouse.py without updating this list,
+#   the drift guard at the bottom of this block raises at collection time instead
+#   of silently leaving the stub with stale/missing behaviour.
 from data.warehouse.warehouse import Warehouse as _RealWarehouse
 
-for _method_name in (
+_REAL_METHOD_NAMES = (
     '_rebuild_entity_indices',
     '_find_robot',
     '_find_package',
@@ -221,17 +228,32 @@ for _method_name in (
     'recount_planned',
     'update_flow_control',
     'reconcile_zone_changes',
-):
-    _attr = _RealWarehouse.__dict__.get(_method_name)
-    if _attr is not None:
-        setattr(WarehouseStub, _method_name, _attr)
+)
 
-# Copy static methods
-for _static_name in ('_robot_is_stopped', '_estimate_charge_travel_cost',
-                      '_normalize_deg'):
-    _attr = _RealWarehouse.__dict__.get(_static_name)
-    if _attr is not None:
-        setattr(WarehouseStub, _static_name, _attr)
+# Static methods copied verbatim (preserve @staticmethod descriptor).
+_REAL_STATIC_NAMES = (
+    '_robot_is_stopped',
+    '_estimate_charge_travel_cost',
+    '_normalize_deg',
+)
+
+# Drift guard: fail loudly at collection time if any listed name no longer
+# exists on the real Warehouse class (e.g. after a rename), instead of
+# silently leaving the stub with stale behaviour.
+_missing = [
+    name for name in (_REAL_METHOD_NAMES + _REAL_STATIC_NAMES)
+    if name not in _RealWarehouse.__dict__
+]
+if _missing:
+    raise RuntimeError(
+        "WarehouseStub drift detected: the following names are listed in "
+        "tests/conftest.py but no longer exist on Warehouse: "
+        + ", ".join(_missing)
+        + ". Update the copy lists to match warehouse.py."
+    )
+
+for _name in _REAL_METHOD_NAMES + _REAL_STATIC_NAMES:
+    setattr(WarehouseStub, _name, _RealWarehouse.__dict__[_name])
 
 
 # ---------------------------------------------------------------------------

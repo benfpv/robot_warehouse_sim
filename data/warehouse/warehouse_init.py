@@ -1,6 +1,9 @@
 import numpy as np
+import logging
 
 from data.functions import Functions
+
+_log = logging.getLogger('warehouse')
 
 
 class Warehouse_Init:
@@ -54,8 +57,7 @@ class Warehouse_Init:
         zoneMap[y_base            : y_base + zone_h,     x0:x0 + zone_w] = 1  # ZONE_IMPORT
         zoneMap[y_base + zone_h   : y_base + zone_h * 2, x0:x0 + zone_w] = 2  # ZONE_STORAGE
         zoneMap[y_base + zone_h*2 : y_base + zone_h * 3, x0:x0 + zone_w] = 3  # ZONE_EXPORT
-        print('- Zone map: shape {}, cells per zone: {}'.format(
-            zoneMap.shape,
-            {v: int(np.count_nonzero(zoneMap == v)) for v in [1, 2, 3]}
-        ))
+        _log.info('- Zone map: shape %s, cells per zone: %s',
+                  zoneMap.shape,
+                  {v: int(np.count_nonzero(zoneMap == v)) for v in [1, 2, 3]})
         return zoneMap
